@@ -1,0 +1,116 @@
+---
+title: "Smart contracts and chaincode"
+description: "An overview of Hyperledger Fabric smart contracts and chaincode: what they are, how they interact with the ledger via read-write sets, supported languages, the Contract API, system chaincode, and chaincode as a service."
+---
+
+In Hyperledger Fabric, a **smart contract** defines the executable logic that generates facts added to the ledger. A **chaincode** is the deployment unit that packages one or more smart contracts together. Whereas a ledger holds facts about the current and historical state of business objects, smart contracts define the rules that govern how those objects change.
+
+Think of the distinction this way: smart contracts govern *transactions*, while chaincode governs how smart contracts are *packaged for deployment*. Multiple smart contracts can live inside a single chaincode. When that chaincode is deployed to a channel, all of its smart contracts become available to applications on that channel.
+
+## How chaincode differs from public blockchain smart contracts
+
+On public blockchains like Ethereum, any node in the network can generate a valid transaction. Hyperledger Fabric takes a more realistic approach to multi-party business processes: transactions must be validated by trusted, known organizations via **endorsement policies**.
+
+An endorsement policy specifies which organizations must execute and sign a transaction for it to be considered valid. For example, a car transfer transaction might require signatures from both the buyer's organization and the seller's organization — not just any participant in the network. This makes Fabric suited for permissioned enterprise use cases where identity and accountability matter.
+
+## How chaincode interacts with the ledger
+
+The ledger has two components that chaincode can access:
+
+- **World state**: a key-value cache of the current value of all ledger states. Chaincode reads from and writes to the world state using `GetState`, `PutState`, and `DelState` calls.
+- **Blockchain**: an immutable log of all transactions. Chaincode can query transaction history but cannot modify it.
+
+When a smart contract executes, it does **not** immediately update the world state. Instead, it produces a **read-write set** — a record of which keys were read and what the proposed new values are. That read-write set is returned as a transaction proposal response and must be endorsed by the required organizations, ordered, and validated before the world state is updated.
+
+This execute-order-validate model works in three phases:
+
+1. **Execute**: Endorsing peers simulate the transaction and produce a read-write set.
+2. **Order**: The ordering service sequences endorsed transactions into blocks.
+3. **Validate**: All peers validate endorsements and check for read-write conflicts before committing.
+
+<Note>
+The world state is not updated when a smart contract executes on endorsing peers. The update only happens after the transaction passes both endorsement and validation checks. Both valid and invalid transactions are written to the blockchain, but only valid transactions update the world state.
+</Note>
+
+## Supported languages
+
+Fabric supports chaincode written in three languages:
+
+| Language | Package | Notes |
+|----------|---------|-------|
+| **Go** | `fabric-contract-api-go` | Most common in production. Use alphabetically ordered struct fields for deterministic JSON. |
+| **Node.js** | `fabric-contract-api` (npm) | Supports JavaScript and TypeScript. Use `json-stringify-deterministic` for consistent JSON. |
+| **Java** | `fabric-chaincode-java` (Maven) | Use the `Genson` library for consistent JSON serialization; avoid `Gson`. |
+
+## The Contract API
+
+The `fabric-contract-api` provides a high-level programming model for writing smart contracts. You define a struct or class that embeds (Go) or extends (Node.js, Java) the base `Contract` type, and each public method automatically becomes an invocable transaction function.
+
+Each transaction function receives a **transaction context** (`ctx`) that provides:
+
+- Access to the ledger stub (`ctx.GetStub()` in Go, `ctx.stub` in Node.js) for `GetState`, `PutState`, and other ledger operations
+- The client identity of the transaction submitter for access control decisions
+
+The transaction context is the primary interface between your business logic and the Fabric runtime.
+
+### Shim API (low-level alternative)
+
+The shim API (`ChaincodeStubInterface`) is the underlying interface that the Contract API wraps. You use it directly when calling ledger methods from the transaction context stub. It is also used in the older `Init`/`Invoke` style that predates the Contract API. For new chaincode, use the Contract API.
+
+## Application chaincode vs. system chaincode
+
+Most developers work with **application chaincode** — smart contracts that implement business logic agreed upon by channel members.
+
+**System chaincode** is different: it is compiled directly into the peer binary and implements internal Fabric functions. System chaincodes are not deployed by end users.
+
+| Name | Abbreviation | Purpose |
+|------|-------------|---------|
+| `_lifecycle` | — | Manages chaincode installation, approval, and commit on channels |
+| Configuration System Chaincode | CSCC | Handles channel configuration updates |
+| Query System Chaincode | QSCC | Provides ledger query APIs (block and transaction queries) |
+| Endorsement System Chaincode | ESCC | Cryptographically signs transaction responses on endorsing peers |
+| Validation System Chaincode | VSCC | Validates transactions against endorsement policies |
+
+<Warning>
+Modifying system chaincode requires deep Fabric expertise. Errors in system chaincode can cause ledger forks where different peers hold inconsistent world state — a critical failure for any network.
+</Warning>
+
+## Chaincode as a service
+
+Fabric v2.0 introduced external builders, and Fabric v2.4.1 added the built-in `ccaasbuilder` to the peer image. Together these allow chaincode to run as a long-lived external process rather than being built and launched by the peer.
+
+This is useful when:
+
+- You are deploying to Kubernetes or environments where the Docker daemon is not available to the peer.
+- You want to run multiple peers sharing one chaincode process.
+- You need to debug chaincode with a standard IDE debugger.
+
+In the external service model, the chaincode package installed to peers contains only connection information (host, port, TLS config) rather than source code. The chaincode process is managed independently and connects back to the peer over gRPC:
+
+```json
+{
+  "address": "chaincode-service.example.com:9999",
+  "dial_timeout": "10s",
+  "tls_required": true
+}
+```
+
+## Channels and chaincode scope
+
+Chaincode is deployed to a specific **channel**. Once committed to a channel, all smart contracts in that chaincode become available to organizations on that channel. The same chaincode name can be deployed independently on different channels with different endorsement policies.
+
+Smart contracts can call other smart contracts on the same channel (read-write) or on different channels (read-only query only). Cross-channel reads do not participate in the state validation checks of the calling transaction.
+
+## Learn more
+
+<CardGroup cols={3}>
+  <Card title="Developing chaincode" icon="pencil" href="/chaincode/developing">
+    Write smart contracts using the Contract API with code examples in Go, Node.js, and Java.
+  </Card>
+  <Card title="Chaincode lifecycle" icon="arrows-rotate" href="/chaincode/lifecycle">
+    Understand the multi-org governance process for packaging, installing, approving, and committing chaincode.
+  </Card>
+  <Card title="Deploying chaincode" icon="rocket" href="/chaincode/deploying">
+    Follow a complete walkthrough deploying the asset-transfer chaincode to a Fabric test network.
+  </Card>
+</CardGroup>

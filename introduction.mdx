@@ -1,0 +1,88 @@
+---
+title: "Introduction"
+description: "Hyperledger Fabric is an enterprise-grade permissioned distributed ledger framework for building blockchain solutions."
+---
+
+Hyperledger Fabric is an open-source, enterprise-grade permissioned distributed ledger technology (DLT) platform hosted under the Linux Foundation. Unlike public blockchains such as Bitcoin or Ethereum, Fabric is designed from the ground up for enterprise use cases where participant identity, data confidentiality, and high transaction throughput are critical requirements.
+
+<CardGroup cols={2}>
+  <Card title="Get Started" icon="rocket" href="/getting-started/prerequisites">
+    Install prerequisites and set up your first Fabric network in minutes
+  </Card>
+  <Card title="Key Concepts" icon="book" href="/key-concepts">
+    Understand peers, orderers, channels, chaincode, and MSPs
+  </Card>
+  <Card title="Smart Contracts" icon="file-code" href="/chaincode/overview">
+    Write and deploy chaincode in Go, Java, or Node.js
+  </Card>
+  <Card title="Command Reference" icon="terminal" href="/commands/peer-overview">
+    Full reference for peer, configtxgen, cryptogen, and other CLI tools
+  </Card>
+</CardGroup>
+
+## What is Hyperledger Fabric?
+
+Fabric provides a uniquely **modular and configurable** architecture that enables innovation, versatility, and optimization for a broad range of industry use cases — from banking and finance to supply chain, healthcare, and digital assets.
+
+Key differentiators from other blockchain platforms:
+
+- **Permissioned network** — All participants are known and authenticated using X.509 certificates issued by a Certificate Authority (CA). There are no anonymous actors.
+- **Execute-order-validate** — Fabric's unique transaction flow separates execution from ordering, enabling parallel processing, standard programming languages, and high throughput.
+- **No cryptocurrency required** — Fabric does not need a native token or mining to operate, removing significant cost and attack vectors.
+- **Pluggable components** — Consensus (Raft CFT or SmartBFT), identity management, and cryptographic libraries are all swappable without re-architecting the network.
+- **Privacy by design** — Channels and private data collections allow subsets of network participants to transact confidentially, even on a shared infrastructure.
+
+## Core components
+
+| Component | Role |
+|-----------|------|
+| **Peer** | Hosts the ledger and executes chaincode (smart contracts) |
+| **Orderer** | Orders transactions into blocks and delivers them to peers |
+| **Certificate Authority (CA)** | Issues X.509 certificates for identity management |
+| **Chaincode** | Business logic running inside isolated containers |
+| **Channel** | A private sub-network for transaction isolation |
+| **MSP** | Membership Service Provider — maps certificates to identities |
+
+## The execute-order-validate model
+
+Fabric's transaction flow has three distinct phases:
+
+1. **Execute** — Client sends a transaction proposal to endorsing peers, which simulate execution and return a signed read-write set
+2. **Order** — The signed transaction is sent to the ordering service, which produces a deterministic sequence of blocks
+3. **Validate** — All peers validate endorsement policies and commit valid transactions to the ledger
+
+This approach eliminates non-determinism (allowing standard languages like Go, Java, and Node.js), enables parallel execution across peers, and preserves confidentiality since only endorsing peers see the transaction data.
+
+## Supported use cases
+
+<CardGroup cols={2}>
+  <Card title="Supply Chain" icon="truck">
+    Track goods across organizations with tamper-evident provenance and shared visibility
+  </Card>
+  <Card title="Financial Services" icon="building-columns">
+    Settle trades, manage assets, and audit transactions with regulatory compliance
+  </Card>
+  <Card title="Healthcare" icon="hospital">
+    Share patient records across institutions while maintaining strict access controls
+  </Card>
+  <Card title="Trade Finance" icon="globe">
+    Automate letters of credit, invoice financing, and cross-border payments
+  </Card>
+</CardGroup>
+
+## Where to start
+
+<Steps>
+  <Step title="Install prerequisites">
+    Set up Docker, Go, and other required software on your development machine. See [Prerequisites](/getting-started/prerequisites).
+  </Step>
+  <Step title="Run the test network">
+    Deploy a local Fabric network using the fabric-samples test network to explore the platform. See [Test Network](/getting-started/test-network).
+  </Step>
+  <Step title="Write your first smart contract">
+    Learn how to write, package, and deploy a chaincode in Go or Node.js. See [Developing Chaincode](/chaincode/developing).
+  </Step>
+  <Step title="Build a client application">
+    Use the Fabric Gateway API to submit transactions from your application. See [First Application](/getting-started/first-application).
+  </Step>
+</Steps>

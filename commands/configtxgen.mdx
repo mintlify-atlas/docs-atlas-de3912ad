@@ -1,0 +1,165 @@
+---
+title: "configtxgen"
+description: "Generate and inspect channel configuration artifacts from configtx.yaml."
+---
+
+`configtxgen` creates the genesis block and channel artifacts required to bootstrap a Fabric network and channels. Its output is controlled by the `configtx.yaml` file located at `FABRIC_CFG_PATH`.
+
+## Flags
+
+| Flag | Description |
+|------|-------------|
+| `-configPath <path>` | Path to the directory containing `configtx.yaml` (overrides `FABRIC_CFG_PATH`) |
+| `-channelID <id>` | Channel ID to use in the generated artifact |
+| `-profile <name>` | Profile name from the `Profiles` section of `configtx.yaml` |
+| `-outputBlock <path>` | Write the genesis block to this file |
+| `-outputCreateChannelTx <path>` | **(Deprecated)** Write a channel creation transaction to this file |
+| `-outputAnchorPeersUpdate <path>` | **(Deprecated)** Write an anchor peer update transaction |
+| `-asOrg <orgName>` | Generate as a specific organization (for anchor peer updates) |
+| `-printOrg <orgName>` | Print an organization's definition as JSON (useful for adding orgs to channels) |
+| `-inspectBlock <path>` | Print the configuration in the block at the given path as JSON |
+| `-inspectChannelCreateTx <path>` | **(Deprecated)** Print the channel creation transaction as JSON |
+| `-version` | Show version information |
+
+## Usage examples
+
+### Generate a genesis block
+
+```bash
+configtxgen \
+  -profile ChannelUsingRaft \
+  -outputBlock ./channel-artifacts/mychannel.block \
+  -channelID mychannel
+```
+
+### Inspect a genesis block
+
+```bash
+configtxgen -inspectBlock ./channel-artifacts/mychannel.block
+```
+
+This outputs the block contents as JSON — useful for verifying the channel configuration.
+
+### Print an organization definition
+
+```bash
+configtxgen -printOrg Org1MSP
+```
+
+Outputs the Org1MSP definition as JSON. Use this when adding an organization to an existing channel.
+
+## configtx.yaml structure
+
+`configtx.yaml` has several top-level sections:
+
+<AccordionGroup>
+  <Accordion title="Organizations">
+    Defines each organization's name, MSP ID, MSP directory, and policies. Also specifies anchor peers for gossip.
+
+    ```yaml
+    Organizations:
+      - &Org1
+        Name: Org1MSP
+        ID: Org1MSP
+        MSPDir: ../organizations/peerOrganizations/org1.example.com/msp
+        Policies:
+          Readers:
+            Type: Signature
+            Rule: "OR('Org1MSP.admin', 'Org1MSP.peer', 'Org1MSP.client')"
+          Writers:
+            Type: Signature
+            Rule: "OR('Org1MSP.admin', 'Org1MSP.client')"
+          Admins:
+            Type: Signature
+            Rule: "OR('Org1MSP.admin')"
+          Endorsement:
+            Type: Signature
+            Rule: "OR('Org1MSP.peer')"
+        AnchorPeers:
+          - Host: peer0.org1.example.com
+            Port: 7051
+    ```
+  </Accordion>
+  <Accordion title="Capabilities">
+    Defines feature flags for the channel, orderer, and application, ensuring all nodes run compatible versions.
+
+    ```yaml
+    Capabilities:
+      Channel: &ChannelCapabilities
+        V3_0: true
+      Orderer: &OrdererCapabilities
+        V2_0: true
+      Application: &ApplicationCapabilities
+        V2_5: true
+    ```
+  </Accordion>
+  <Accordion title="Orderer">
+    Configures the ordering service type (etcdraft), consenters, batch settings, and policies.
+
+    ```yaml
+    Orderer: &OrdererDefaults
+      OrdererType: etcdraft
+      EtcdRaft:
+        Consenters:
+          - Host: orderer.example.com
+            Port: 7050
+            ClientTLSCert: ../organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+            ServerTLSCert: ../organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+      BatchTimeout: 2s
+      BatchSize:
+        MaxMessageCount: 500
+        AbsoluteMaxBytes: 99 MB
+        PreferredMaxBytes: 2 MB
+    ```
+  </Accordion>
+  <Accordion title="Application">
+    Sets policies and capabilities for application (peer) channels.
+
+    ```yaml
+    Application: &ApplicationDefaults
+      Organizations:
+      Policies:
+        Readers:
+          Type: ImplicitMeta
+          Rule: "ANY Readers"
+        Writers:
+          Type: ImplicitMeta
+          Rule: "ANY Writers"
+        Admins:
+          Type: ImplicitMeta
+          Rule: "MAJORITY Admins"
+        LifecycleEndorsement:
+          Type: ImplicitMeta
+          Rule: "MAJORITY Endorsement"
+        Endorsement:
+          Type: ImplicitMeta
+          Rule: "MAJORITY Endorsement"
+      Capabilities:
+        <<: *ApplicationCapabilities
+    ```
+  </Accordion>
+  <Accordion title="Profiles">
+    Named profiles combine the above sections into reusable templates for generating artifacts.
+
+    ```yaml
+    Profiles:
+      ChannelUsingRaft:
+        <<: *ChannelDefaults
+        Orderer:
+          <<: *OrdererDefaults
+          Organizations:
+            - *OrdererOrg
+          Capabilities: *OrdererCapabilities
+        Application:
+          <<: *ApplicationDefaults
+          Organizations:
+            - *Org1
+            - *Org2
+          Capabilities: *ApplicationCapabilities
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+`configtxgen` reads `configtx.yaml` from the path set in `FABRIC_CFG_PATH`. Always ensure this environment variable points to the correct directory before running commands.
+</Note>

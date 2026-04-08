@@ -1,0 +1,203 @@
+---
+title: "Peer commands"
+description: "Reference for the peer CLI — the primary tool for administering Hyperledger Fabric peer nodes, managing channels, and deploying chaincode."
+---
+
+The `peer` CLI is the primary command-line interface for administering a Hyperledger Fabric peer node. You use it to start the peer daemon, join channels, deploy and invoke chaincode, and manage the peer lifecycle.
+
+## Syntax
+
+```bash
+peer <subcommand> [option] [flags]
+```
+
+The top-level `peer` command has five subcommands:
+
+| Subcommand | Description |
+|---|---|
+| [`peer chaincode`](/commands/peer-chaincode) | Invoke and query chaincode (legacy pre-lifecycle commands) |
+| [`peer channel`](/commands/peer-channel) | Manage channel membership and configuration |
+| [`peer lifecycle`](/commands/peer-lifecycle) | Manage the Fabric chaincode lifecycle |
+| `peer node` | Start and manage the peer daemon |
+| `peer version` | Display peer version information |
+
+Use `--help` at any level to get contextual usage:
+
+```bash
+peer --help
+peer channel --help
+peer channel list --help
+```
+
+## Global flags
+
+The following flag applies at the top level:
+
+<ParamField path="--help" type="boolean">
+  Display help for any `peer` command, subcommand, or option.
+</ParamField>
+
+Most subcommands share a common set of global flags for TLS and orderer connectivity:
+
+<ParamField path="--cafile" type="string">
+  Path to a file containing PEM-encoded trusted certificate(s) for the ordering endpoint.
+</ParamField>
+
+<ParamField path="--certfile" type="string">
+  Path to a file containing the PEM-encoded X509 public key to use for mutual TLS communication with the orderer endpoint.
+</ParamField>
+
+<ParamField path="--clientauth" type="boolean">
+  Use mutual TLS when communicating with the orderer endpoint.
+</ParamField>
+
+<ParamField path="--connTimeout" type="duration" default="3s">
+  Timeout for client to connect to the orderer endpoint.
+</ParamField>
+
+<ParamField path="--keyfile" type="string">
+  Path to a file containing the PEM-encoded private key to use for mutual TLS communication with the orderer endpoint.
+</ParamField>
+
+<ParamField path="-o, --orderer" type="string">
+  Ordering service endpoint, specified as `<hostname>:<port>`.
+</ParamField>
+
+<ParamField path="--ordererTLSHostnameOverride" type="string">
+  The hostname override to use when validating the TLS connection to the orderer.
+</ParamField>
+
+<ParamField path="--tls" type="boolean">
+  Use TLS when communicating with the orderer endpoint.
+</ParamField>
+
+<ParamField path="--tlsHandshakeTimeShift" type="duration">
+  The amount of time to shift backwards for certificate expiration checks during TLS handshakes with the orderer endpoint. Use this when orderer TLS certificates have expired but the network has not yet been updated.
+</ParamField>
+
+## Environment variables
+
+The peer binary reads the following environment variables. Set these before running any `peer` command to avoid repeating connection flags on every invocation.
+
+<ParamField path="CORE_PEER_ADDRESS" type="string">
+  The address of the peer node the CLI connects to, in `<host>:<port>` format.
+
+  ```bash
+  export CORE_PEER_ADDRESS=peer0.org1.example.com:7051
+  ```
+</ParamField>
+
+<ParamField path="CORE_PEER_LOCALMSPID" type="string">
+  The MSP ID of the organization that the peer belongs to. Required for signing proposals and transactions.
+
+  ```bash
+  export CORE_PEER_LOCALMSPID=Org1MSP
+  ```
+</ParamField>
+
+<ParamField path="CORE_PEER_MSPCONFIGPATH" type="string">
+  The path to the MSP directory containing the signing identity (private key and certificate) for the peer admin.
+
+  ```bash
+  export CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+  ```
+</ParamField>
+
+<ParamField path="CORE_PEER_TLS_ENABLED" type="boolean">
+  Whether TLS is enabled for peer communication. Set to `true` in production environments.
+
+  ```bash
+  export CORE_PEER_TLS_ENABLED=true
+  ```
+</ParamField>
+
+<ParamField path="CORE_PEER_TLS_ROOTCERT_FILE" type="string">
+  Path to the PEM-encoded TLS CA root certificate file used to verify the peer's TLS certificate.
+
+  ```bash
+  export CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+  ```
+</ParamField>
+
+<ParamField path="CORE_PEER_TLS_CERT_FILE" type="string">
+  Path to the PEM-encoded TLS certificate file for the peer (used for mutual TLS).
+
+  ```bash
+  export CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+  ```
+</ParamField>
+
+<ParamField path="CORE_PEER_TLS_KEY_FILE" type="string">
+  Path to the PEM-encoded private key file corresponding to `CORE_PEER_TLS_CERT_FILE` (used for mutual TLS).
+
+  ```bash
+  export CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+  ```
+</ParamField>
+
+<Tip>
+  In most Fabric test networks, a helper script (such as `scripts/envVar.sh`) exports all of these variables for a given organization and peer. Inspect those scripts for the exact paths used in your deployment.
+</Tip>
+
+## peer node start
+
+Starts the peer daemon, which connects to the network and begins receiving blocks.
+
+**Syntax**
+
+```bash
+peer node start [flags]
+```
+
+**Flags**
+
+<ParamField path="-h, --help" type="boolean">
+  Display help for `peer node start`.
+</ParamField>
+
+<ParamField path="--peer-chaincodedev" type="boolean">
+  Start the peer in chaincode development mode. In this mode, chaincode containers are built and started manually by the developer rather than by the peer. Useful for iterative chaincode development.
+</ParamField>
+
+**Examples**
+
+Start the peer in normal mode:
+
+```bash
+peer node start
+```
+
+Start the peer in chaincode development mode:
+
+```bash
+peer node start --peer-chaincodedev
+```
+
+<Info>
+  The `peer node` command also includes subcommands for offline maintenance operations: `pause`, `resume`, `rollback`, `reset`, `rebuild-dbs`, `upgrade-dbs`, and `unjoin`. These must be run while the peer process is stopped.
+</Info>
+
+## peer version
+
+Displays the version of the peer binary, including the commit SHA, Go runtime version, and OS/architecture.
+
+**Syntax**
+
+```bash
+peer version
+```
+
+**Example output**
+
+```text
+peer:
+  Version: 2.5.15
+  Commit SHA: b78d79b
+  Go version: go1.26.1
+  OS/Arch: linux/amd64
+  Chaincode:
+   Base Docker Label: org.hyperledger.fabric
+   Docker Namespace: hyperledger
+```
+
+The `peer version` command takes no flags other than `--help`.

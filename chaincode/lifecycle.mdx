@@ -1,0 +1,306 @@
+---
+title: 'Chaincode lifecycle'
+description: 'The Fabric chaincode lifecycle process: packaging, installing, approving, and committing chaincode definitions across multiple organizations, including upgrading and endorsement policy syntax.'
+---
+
+The Fabric chaincode lifecycle is a process that requires multiple organizations to agree on how a chaincode will be operated before it can be used on a channel. This multi-org governance model ensures that no single organization can unilaterally deploy or modify business logic that affects all channel members.
+
+<Info>
+This page covers the concepts and commands of the lifecycle process. For a practical step-by-step deployment walkthrough, see [Deploying chaincode](/chaincode/deploying).
+</Info>
+
+## Why the lifecycle exists
+
+In earlier versions of Fabric, chaincode was deployed by a single organization and immediately became active. The current lifecycle (introduced in Fabric v2.0) requires a **majority of channel organizations to approve** a chaincode definition before it can be committed. This means:
+
+- All organizations can inspect the chaincode being deployed and its governance parameters.
+- No organization can change endorsement policies or upgrade chaincode without sufficient agreement from other channel members.
+- Organizations can use different chaincode binaries under the same definition, enabling organization-specific business logic while sharing a common namespace.
+
+The lifecycle tracks chaincode definitions using a **sequence number** — an integer that must be incremented each time the definition is changed. All approvals for a given sequence must be consistent before a commit will succeed.
+
+## Chaincode definition parameters
+
+When organizations approve a chaincode definition, they agree on these parameters:
+
+| Parameter | Description |
+|-----------|-------------|
+| **Name** | The name applications use when invoking the chaincode |
+| **Version** | Human-readable version string (e.g., `v1.0`). The peer does not enforce this; it is a coordination aid |
+| **Sequence** | Integer tracking the number of times the chaincode has been defined. Must increment by 1 on each update |
+| **Endorsement policy** | Which organizations must endorse transactions. Defaults to `Channel/Application/Endorsement` (majority) |
+| **Collection configuration** | Path to private data collection definitions (optional) |
+| **ESCC/VSCC plugins** | Custom endorsement or validation plugins (optional, advanced) |
+| **Init required** | Whether the `Init` function must be called before other functions (optional, not recommended for new chaincode) |
+| **Package ID** | Hash-based identifier of the installed package. Required for orgs that will endorse transactions |
+
+## The lifecycle steps
+
+<Steps>
+  <Step title="Package the chaincode">
+    Package the chaincode source into a `.tar.gz` archive. This can be done by one organization and shared out-of-band, or each organization can package independently.
+
+    ```bash
+    peer lifecycle chaincode package basic.tar.gz \
+      --path ../asset-transfer-basic/chaincode-go/ \
+      --lang golang \
+      --label basic_1.0
+    ```
+
+    The `--label` flag creates a human-readable identifier for the package. Use a label that includes the chaincode name and version (e.g., `basic_1.0`). The package ID used in later steps is derived from this label plus a hash of the package contents.
+
+    The resulting `.tar.gz` contains two files:
+    - `metadata.json` — chaincode type, path, and label
+    - `code.tar.gz` — the chaincode source files
+
+    <Note>
+    It is recommended that organizations only package a chaincode once and share the same package. If a channel wants to ensure all organizations run identical code, one organization packages it and distributes it out of band. Organizations can verify the package ID hash independently.
+    </Note>
+  </Step>
+
+  <Step title="Install the chaincode on peers">
+    Install the package on every peer that will endorse transactions or respond to queries. This step must be performed by a **Peer Administrator**.
+
+    ```bash
+    # Target Org1's peer
+    export CORE_PEER_LOCALMSPID=Org1MSP
+    export CORE_PEER_ADDRESS=localhost:7051
+    export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+    export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+
+    peer lifecycle chaincode install basic.tar.gz
+    ```
+
+    On success, the peer returns the **package ID** — the package label combined with a SHA-256 hash of the package contents:
+
+    ```
+    Chaincode code package identifier: basic_1.0:e2db7f693d4aa6156e652741d5606e9c...
+    ```
+
+    Save this package ID. You will need it in the approval step. Every peer generates the same package ID for the same package.
+
+    <Warning>
+    Organizations that will not endorse transactions do not need to install the chaincode. They can still participate in the lifecycle by approving a definition without a package ID.
+    </Warning>
+  </Step>
+
+  <Step title="Query installed chaincode">
+    Confirm the installation and retrieve the package ID if you did not save it:
+
+    ```bash
+    peer lifecycle chaincode queryinstalled
+    ```
+
+    Output:
+
+    ```
+    Installed chaincodes on peer:
+    Package ID: basic_1.0:e2db7f693d4aa6156e652741d5606e9c5f0de9ebb88c5721cb8248c3aead8123, Label: basic_1.0
+    ```
+
+    Save the package ID as an environment variable for use in the next step:
+
+    ```bash
+    export CC_PACKAGE_ID=basic_1.0:e2db7f693d4aa6156e652741d5606e9c5f0de9ebb88c5721cb8248c3aead8123
+    ```
+  </Step>
+
+  <Step title="Approve the chaincode definition for your organization">
+    Each organization that will use the chaincode must approve a chaincode definition. This approval is submitted to the ordering service and distributed to all peers in the organization. You only need to approve once per organization, even if you have multiple peers.
+
+    ```bash
+    peer lifecycle chaincode approveformyorg \
+      -o localhost:7050 \
+      --ordererTLSHostnameOverride orderer.example.com \
+      --channelID mychannel \
+      --name basic \
+      --version 1.0 \
+      --package-id $CC_PACKAGE_ID \
+      --sequence 1 \
+      --tls \
+      --cafile "${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem"
+    ```
+
+    Key flags:
+    - `--sequence 1` — must match across all approvals. Increment by 1 on each upgrade.
+    - `--package-id` — the identifier from the install step. Omit this flag if your org will not endorse transactions.
+    - `--signature-policy` — optional custom endorsement policy (see [Endorsement policy syntax](#endorsement-policy-syntax)).
+
+    This command must be run by an **Organization Administrator**. Approvals for each organization are stored in a collection accessible to all peers in that organization.
+  </Step>
+
+  <Step title="Check commit readiness">
+    Before committing, verify that enough organizations have approved the same definition. The `checkcommitreadiness` command takes the same parameters as `approveformyorg` (minus `--package-id`):
+
+    ```bash
+    peer lifecycle chaincode checkcommitreadiness \
+      --channelID mychannel \
+      --name basic \
+      --version 1.0 \
+      --sequence 1 \
+      --tls \
+      --cafile "${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem" \
+      --output json
+    ```
+
+    Output:
+
+    ```json
+    {
+        "Approvals": {
+            "Org1MSP": true,
+            "Org2MSP": true
+        }
+    }
+    ```
+
+    The chaincode definition is ready to commit when all required organizations show `true`. The required number is governed by the `Channel/Application/LifecycleEndorsement` policy — by default, a majority of channel members.
+
+    Use the `--inspect` flag to get a detailed breakdown of what is mismatched when an organization's approval shows `false`.
+  </Step>
+
+  <Step title="Commit the chaincode definition to the channel">
+    Once a sufficient number of organizations have approved, one organization commits the definition to the channel. The commit transaction targets peers from the approving organizations to collect their endorsements, then submits to the ordering service.
+
+    ```bash
+    peer lifecycle chaincode commit \
+      -o localhost:7050 \
+      --ordererTLSHostnameOverride orderer.example.com \
+      --channelID mychannel \
+      --name basic \
+      --version 1.0 \
+      --sequence 1 \
+      --tls \
+      --cafile "${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem" \
+      --peerAddresses localhost:7051 \
+      --tlsRootCertFiles "${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt" \
+      --peerAddresses localhost:9051 \
+      --tlsRootCertFiles "${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt"
+    ```
+
+    You must include `--peerAddresses` for enough organizations to satisfy the `LifecycleEndorsement` policy. After the commit is validated and added to a block, the chaincode containers start on all peers where the chaincode was installed.
+
+    <Note>
+    The commit does not include the package ID. Peers use their locally approved definition (which does include the package ID) to find and launch the correct installed package.
+    </Note>
+  </Step>
+
+  <Step title="Query committed chaincode">
+    Confirm the chaincode definition has been successfully committed:
+
+    ```bash
+    peer lifecycle chaincode querycommitted --channelID mychannel --name basic
+    ```
+
+    Output:
+
+    ```
+    Committed chaincode definition for chaincode 'basic' on channel 'mychannel':
+    Version: 1.0, Sequence: 1, Endorsement Plugin: escc, Validation Plugin: vscc, Approvals: [Org1MSP: true, Org2MSP: true]
+    ```
+
+    The chaincode is now active on the channel and can be invoked by applications.
+  </Step>
+</Steps>
+
+## Upgrading chaincode
+
+To upgrade a chaincode, follow the same lifecycle process with these adjustments:
+
+1. **Repackage and reinstall** (only if changing the binaries). This generates a new package ID.
+2. **Approve a new definition** with:
+   - The updated `--version` (if binaries changed)
+   - The new `--package-id` (if binaries changed)
+   - The `--sequence` incremented by 1
+3. **Commit** the new definition once enough organizations have approved.
+
+After the commit, a new chaincode container launches automatically. The previous chaincode version continues running until the new definition is active.
+
+<Note>
+Ledger state is not version-specific. State written by chaincode v1 is accessible to chaincode v2. You can add optional JSON fields in an upgrade as long as the updated chaincode handles state written by the previous version.
+</Note>
+
+You can also **update endorsement policies** without changing the chaincode binaries. Approve and commit a new definition with the same `--version` and a new `--sequence` and `--signature-policy`. The chaincode container does not restart.
+
+## Endorsement policy syntax
+
+Endorsement policies are specified using a signature policy expression of the form `EXPR(E[, E...])` where:
+
+- `EXPR` is `AND`, `OR`, or `OutOf`
+- `E` is a principal in the form `'MSPID.role'` or a nested expression
+
+Valid roles are: `member`, `admin`, `client`, `peer`.
+
+### Examples
+
+```
+# Require a signature from both Org1 and Org2
+AND('Org1MSP.member', 'Org2MSP.member')
+
+# Require a signature from either Org1 or Org2
+OR('Org1MSP.member', 'Org2MSP.member')
+
+# Require Org1's signature, plus at least one of Org2 or Org3
+OR('Org1MSP.member', AND('Org2MSP.member', 'Org3MSP.member'))
+
+# Require any 2 out of 3 organizations
+OutOf(2, 'Org1MSP.member', 'Org2MSP.member', 'Org3MSP.member')
+
+# Restrict endorsement to peers only (requires identity classification enabled)
+AND('Org1MSP.peer', 'Org2MSP.peer')
+```
+
+Pass the policy using `--signature-policy` in both `approveformyorg` and `commit`:
+
+```bash
+peer lifecycle chaincode approveformyorg \
+  --channelID mychannel \
+  --signature-policy "AND('Org1MSP.member', 'Org2MSP.member')" \
+  --name basic --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 \
+  --tls --cafile "$ORDERER_CA"
+```
+
+Alternatively, reference a policy from the channel configuration using `--channel-config-policy`:
+
+```bash
+peer lifecycle chaincode approveformyorg \
+  --channelID mychannel \
+  --channel-config-policy Channel/Application/Admins \
+  --name basic --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 \
+  --tls --cafile "$ORDERER_CA"
+```
+
+<Tip>
+If you do not specify a policy, the definition uses `Channel/Application/Endorsement` by default — a majority of channel members. This policy updates automatically as organizations join or leave the channel, unlike a `--signature-policy` that hardcodes specific MSP IDs.
+</Tip>
+
+## Deployment scenarios
+
+### New organization joining a channel
+
+When a new organization joins a channel with an existing committed chaincode, they install the chaincode, approve the already-committed definition, and can immediately start using the chaincode. The definition does not need to be re-committed.
+
+If the default majority policy is in use, adding a new organization automatically updates the required endorsement count.
+
+### Organizations using different chaincode binaries
+
+Multiple organizations can use different package IDs when approving the same chaincode definition. This enables each organization to install chaincode binaries that contain organization-specific validation or integration logic, while sharing the same endorsement policy and ledger namespace.
+
+### Approving without installing
+
+An organization can approve a chaincode definition without installing the package — they simply omit `--package-id`. This allows them to satisfy the `LifecycleEndorsement` policy without needing to endorse transactions themselves.
+
+### Multiple chaincode instances from one package
+
+You can approve and commit multiple chaincode definitions that reference the same package, each with a different chaincode name. This creates multiple independently governed chaincode instances on the same channel.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Deploying chaincode" icon="rocket" href="/chaincode/deploying">
+    Complete deployment walkthrough for the asset-transfer chaincode using the Fabric test network.
+  </Card>
+  <Card title="Developing chaincode" icon="pencil" href="/chaincode/developing">
+    Learn how to write smart contracts with the Contract API in Go, Node.js, and Java.
+  </Card>
+</CardGroup>

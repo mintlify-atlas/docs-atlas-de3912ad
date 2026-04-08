@@ -1,0 +1,156 @@
+---
+title: "configtxlator"
+description: "Convert Fabric protobuf structures to/from JSON and compute configuration update deltas."
+---
+
+`configtxlator` translates between protobuf and JSON representations of Fabric data structures, and computes the delta between two channel configurations. It can run as a REST server or as a CLI tool.
+
+## Subcommands
+
+### configtxlator start
+
+Start a REST server (default port 7059):
+
+```bash
+configtxlator start --hostname=0.0.0.0 --port=7059
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--hostname` | `0.0.0.0` | Hostname or IP to listen on |
+| `--port` | `7059` | Port to listen on |
+| `--CORS` | — | Allowed CORS domains (repeatable) |
+
+### configtxlator proto_encode
+
+Convert a JSON document to protobuf:
+
+```bash
+configtxlator proto_encode \
+  --type common.Config \
+  --input modified_config.json \
+  --output modified_config.pb
+```
+
+| Flag | Description |
+|------|-------------|
+| `--type` | Protobuf type (e.g. `common.Config`, `common.Block`, `common.Envelope`) |
+| `--input` | Input JSON file (default: stdin) |
+| `--output` | Output protobuf file (default: stdout) |
+
+### configtxlator proto_decode
+
+Convert protobuf to JSON:
+
+```bash
+configtxlator proto_decode \
+  --type common.Block \
+  --input fabric_block.pb
+```
+
+| Flag | Description |
+|------|-------------|
+| `--type` | Protobuf type to decode |
+| `--input` | Input protobuf file (default: stdin) |
+| `--output` | Output JSON file (default: stdout) |
+
+### configtxlator compute_update
+
+Compute the config update delta between two `common.Config` protobufs:
+
+```bash
+configtxlator compute_update \
+  --channel_id mychannel \
+  --original original_config.pb \
+  --updated modified_config.pb \
+  --output config_update.pb
+```
+
+| Flag | Description |
+|------|-------------|
+| `--channel_id` | Channel name (required) |
+| `--original` | Original config protobuf |
+| `--updated` | Modified config protobuf |
+| `--output` | Output config update (default: stdout) |
+
+## Channel configuration update workflow
+
+Use `configtxlator` to modify an existing channel configuration. This example adds an anchor peer.
+
+<Steps>
+  <Step title="Fetch the current config block">
+    ```bash
+    peer channel fetch config config_block.pb \
+      -o orderer.example.com:7050 \
+      -c mychannel \
+      --tls --cafile $ORDERER_CA
+    ```
+  </Step>
+  <Step title="Decode the config block to JSON">
+    ```bash
+    configtxlator proto_decode \
+      --input config_block.pb \
+      --type common.Block \
+      | jq .data.data[0].payload.data.config > config.json
+    ```
+  </Step>
+  <Step title="Modify the JSON">
+    Edit `config.json` to make your change (e.g., add an anchor peer):
+
+    ```bash
+    jq '.channel_group.groups.Application.groups.Org1MSP.values += {
+      "AnchorPeers": {
+        "mod_policy": "Admins",
+        "value": {
+          "anchor_peers": [{"host": "peer0.org1.example.com", "port": 7051}]
+        },
+        "version": "0"
+      }
+    }' config.json > modified_config.json
+    ```
+  </Step>
+  <Step title="Encode both configs to protobuf">
+    ```bash
+    configtxlator proto_encode --type common.Config --input config.json          --output original_config.pb
+    configtxlator proto_encode --type common.Config --input modified_config.json --output modified_config.pb
+    ```
+  </Step>
+  <Step title="Compute the update delta">
+    ```bash
+    configtxlator compute_update \
+      --channel_id mychannel \
+      --original original_config.pb \
+      --updated modified_config.pb \
+      --output config_update.pb
+    ```
+  </Step>
+  <Step title="Wrap the update in an envelope">
+    ```bash
+    configtxlator proto_decode --type common.ConfigUpdate --input config_update.pb \
+      | jq -s '.[0] as $update | {"payload":{"header":{"channel_header":{"channel_id":"mychannel","type":2}},"data":{"config_update":$update}}}' \
+      | configtxlator proto_encode --type common.Envelope --output config_update_envelope.pb
+    ```
+  </Step>
+  <Step title="Sign and submit">
+    ```bash
+    peer channel signconfigtx -f config_update_envelope.pb
+
+    peer channel update \
+      -f config_update_envelope.pb \
+      -c mychannel \
+      -o orderer.example.com:7050 \
+      --tls --cafile $ORDERER_CA
+    ```
+  </Step>
+</Steps>
+
+## Common protobuf types
+
+| Type | Used for |
+|------|----------|
+| `common.Block` | A full channel block |
+| `common.Config` | Channel configuration |
+| `common.ConfigUpdate` | A channel config update delta |
+| `common.Envelope` | Signed transaction envelope |
+| `common.ConfigUpdateEnvelope` | Signed config update |
+| `msp.MSPConfig` | MSP configuration |

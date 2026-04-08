@@ -1,0 +1,716 @@
+---
+title: Build your first application
+description: Use the Fabric Gateway client API to build a Go, Node.js, or Java application that submits and evaluates transactions on a Hyperledger Fabric network.
+---
+
+This tutorial walks through building a client application that interacts with a deployed Fabric smart contract using the **Fabric Gateway client API**. It uses the Asset Transfer (basic) sample from `fabric-samples`.
+
+<Info>
+  If you are not yet familiar with the architecture of a Fabric network, review the key concepts documentation before continuing. You should also be familiar with the [test network](/getting-started/test-network) before following this tutorial.
+</Info>
+
+## What you will build
+
+The Asset Transfer sample consists of two components:
+
+1. **Smart contract** (chaincode) — implements the business logic for creating, reading, updating, and deleting assets on the ledger. Located in `asset-transfer-basic/chaincode-(go|typescript|java)`.
+2. **Client application** — uses the Fabric Gateway client API to connect to the network and invoke the smart contract. Located in `asset-transfer-basic/application-gateway-(go|typescript|java)`.
+
+By the end of this tutorial you will understand how to:
+
+- Establish a gRPC connection to the Fabric Gateway
+- Create a `Gateway` connection using an X.509 identity
+- Access a network (channel) and contract (chaincode)
+- Submit transactions that update the ledger (`SubmitTransaction`)
+- Evaluate transactions that query the ledger without modifying it (`EvaluateTransaction`)
+- Handle transaction errors correctly
+
+---
+
+## The Fabric Gateway API
+
+Fabric Gateway (introduced in Fabric v2.4) is a peer-hosted service that simplifies client application development. It handles the complexity of:
+
+- Gathering transaction endorsements from the required organizations
+- Submitting endorsed transactions to the ordering service
+- Waiting for commit confirmation
+- Emitting chaincode events to subscribers
+
+Client applications interact with the Gateway through one of three language SDKs:
+
+- **Go** — `github.com/hyperledger/fabric-gateway/pkg/client`
+- **Node.js (TypeScript/JavaScript)** — `@hyperledger/fabric-gateway`
+- **Java** — `org.hyperledger.fabric:fabric-gateway`
+
+The API exposes logical abstractions (network, contract) rather than operational ones (peer, chaincode), so you focus on business logic rather than infrastructure.
+
+---
+
+## Before you begin
+
+Make sure you have the fabric-samples repository installed. See [Install Fabric](/getting-started/install).
+
+The Fabric Gateway client API requires a language runtime installed locally. Install whichever language you plan to use:
+
+- **Go** — [go.dev/doc/install](https://go.dev/doc/install) (Fabric uses Go 1.26.1)
+- **Node.js** — [nodejs.org](https://nodejs.org/en/download) (LTS recommended)
+- **Java** — [adoptium.net](https://adoptium.net/) (Java 11 or later)
+
+---
+
+## Set up the blockchain network
+
+<Steps>
+  <Step title="Navigate to the test network directory">
+    ```bash
+    cd fabric-samples/test-network
+    ```
+  </Step>
+
+  <Step title="Tear down any existing network">
+    ```bash
+    ./network.sh down
+    ```
+  </Step>
+
+  <Step title="Start the network with Certificate Authorities">
+    ```bash
+    ./network.sh up createChannel -c mychannel -ca
+    ```
+
+    This deploys two peers, an ordering service, and three Fabric CAs — one per organization. Using CAs (rather than cryptogen) means the sample application can enroll client identities using the Fabric CA SDKs.
+  </Step>
+
+  <Step title="Deploy the smart contract">
+    Choose the chaincode language. The client application language does not have to match the chaincode language.
+
+    <Tabs>
+      <Tab title="Go">
+        ```bash
+        ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-go/ -ccl go
+        ```
+      </Tab>
+      <Tab title="TypeScript">
+        ```bash
+        ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-typescript/ -ccl typescript
+        ```
+      </Tab>
+      <Tab title="Java">
+        ```bash
+        ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-java/ -ccl java
+        ```
+      </Tab>
+    </Tabs>
+
+    On success, the output will include:
+
+    ```text
+    Committed chaincode definition for chaincode 'basic' on channel 'mychannel':
+    Version: 1.0, Sequence: 1, Endorsement Plugin: escc, Validation Plugin: vscc, Approvals: [Org1MSP: true, Org2MSP: true]
+    ```
+  </Step>
+
+  <Step title="Navigate to the application directory">
+    Open a new terminal and navigate to the application directory for your chosen language:
+
+    <Tabs>
+      <Tab title="Go">
+        ```bash
+        cd asset-transfer-basic/application-gateway-go
+        ```
+
+        The directory contains `assetTransfer.go`, `go.mod`, and `go.sum`. No build step is needed before running.
+      </Tab>
+      <Tab title="TypeScript">
+        ```bash
+        cd asset-transfer-basic/application-gateway-typescript
+        npm install
+        ```
+
+        This installs `@hyperledger/fabric-gateway` and other dependencies. The compiled output is placed in `dist/`.
+      </Tab>
+      <Tab title="Java">
+        ```bash
+        cd asset-transfer-basic/application-gateway-java
+        ./gradlew build
+        ```
+
+        This installs `org.hyperledger.fabric:fabric-gateway` and compiles the source under `src/main/java/`.
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+---
+
+## Run the sample application
+
+From the application directory, run:
+
+<Tabs>
+  <Tab title="Go">
+    ```bash
+    go run .
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```bash
+    npm start
+    ```
+  </Tab>
+  <Tab title="Java">
+    ```bash
+    ./gradlew run
+    ```
+  </Tab>
+</Tabs>
+
+The application will walk through the full lifecycle: initializing the ledger, querying assets, creating an asset, transferring ownership, and handling an intentional error.
+
+---
+
+## How the application works
+
+### Step 1 — Establish a gRPC connection
+
+The application opens a single gRPC connection to the Fabric Gateway service (hosted on a peer). This connection is reused for all subsequent interactions.
+
+<Warning>
+  gRPC connections carry significant overhead. Create one connection per application instance and reuse it for every gateway interaction.
+</Warning>
+
+<Warning>
+  Connect to a Fabric Gateway belonging to the same organization as the client identity to maintain the privacy of any transient data. If your organization does not host a gateway, use a trusted gateway in another organization.
+</Warning>
+
+<CodeGroup>
+
+```typescript TypeScript
+const peerEndpoint = 'localhost:7051';
+const peerHostOverride = 'peer0.org1.example.com';
+
+async function newGrpcConnection(): Promise<grpc.Client> {
+    const tlsRootCert = await fs.readFile(tlsCertPath);
+    const tlsCredentials = grpc.credentials.createSsl(tlsRootCert);
+    return new grpc.Client(peerEndpoint, tlsCredentials, {
+        'grpc.ssl_target_name_override': peerHostOverride,
+    });
+}
+```
+
+```go Go
+const (
+    peerEndpoint    = "dns:///localhost:7051"
+    peerHostOverride = "peer0.org1.example.com"
+)
+
+func newGrpcConnection() *grpc.ClientConn {
+    certificatePEM, err := os.ReadFile(tlsCertPath)
+    if err != nil {
+        panic(fmt.Errorf("failed to read TLS certificate file: %w", err))
+    }
+
+    certificate, err := identity.CertificateFromPEM(certificatePEM)
+    if err != nil {
+        panic(err)
+    }
+
+    certPool := x509.NewCertPool()
+    certPool.AddCert(certificate)
+    transportCredentials := credentials.NewClientTLSFromCert(certPool, peerHostOverride)
+
+    connection, err := grpc.NewClient(peerEndpoint, grpc.WithTransportCredentials(transportCredentials))
+    if err != nil {
+        panic(fmt.Errorf("failed to create gRPC connection: %w", err))
+    }
+
+    return connection
+}
+```
+
+```java Java
+private static final String PEER_ENDPOINT = "localhost:7051";
+private static final String PEER_HOST_OVERRIDE = "peer0.org1.example.com";
+
+private static ManagedChannel newGrpcConnection() throws IOException {
+    var credentials = TlsChannelCredentials.newBuilder()
+        .trustManager(TLS_CERT_PATH.toFile())
+        .build();
+    return Grpc.newChannelBuilder(PEER_ENDPOINT, credentials)
+        .overrideAuthority(PEER_HOST_OVERRIDE)
+        .build();
+}
+```
+
+</CodeGroup>
+
+### Step 2 — Create a Gateway connection
+
+The `Gateway` connection uses the gRPC connection plus a client identity and signing implementation. The application uses the Org1 user's X.509 certificate and corresponding private key.
+
+<CodeGroup>
+
+```typescript TypeScript
+const client = await newGrpcConnection();
+
+const gateway = connect({
+    client,
+    identity: await newIdentity(),
+    signer: await newSigner(),
+    hash: hash.sha256,
+});
+
+async function newIdentity(): Promise<Identity> {
+    const credentials = await fs.promises.readFile(certPath);
+    return { mspId: 'Org1MSP', credentials };
+}
+
+async function newSigner(): Promise<Signer> {
+    const privateKeyPem = await fs.promises.readFile(keyPath);
+    const privateKey = crypto.createPrivateKey(privateKeyPem);
+    return signers.newPrivateKeySigner(privateKey);
+}
+```
+
+```go Go
+clientConnection := newGrpcConnection()
+defer clientConnection.Close()
+
+gw, err := client.Connect(
+    newIdentity(),
+    client.WithSign(newSign()),
+    client.WithHash(hash.SHA256),
+    client.WithClientConnection(clientConnection),
+)
+
+func newIdentity() *identity.X509Identity {
+    certificatePEM, err := os.ReadFile(certPath)
+    if err != nil {
+        panic(fmt.Errorf("failed to read certificate file: %w", err))
+    }
+
+    certificate, err := identity.CertificateFromPEM(certificatePEM)
+    if err != nil {
+        panic(err)
+    }
+
+    id, err := identity.NewX509Identity("Org1MSP", certificate)
+    if err != nil {
+        panic(err)
+    }
+
+    return id
+}
+
+func newSign() identity.Sign {
+    privateKeyPEM, err := readFirstFile(keyPath)
+    if err != nil {
+        panic(fmt.Errorf("failed to read private key file: %w", err))
+    }
+
+    privateKey, err := identity.PrivateKeyFromPEM(privateKeyPEM)
+    if err != nil {
+        panic(err)
+    }
+
+    sign, err := identity.NewPrivateKeySign(privateKey)
+    if err != nil {
+        panic(err)
+    }
+
+    return sign
+}
+```
+
+```java Java
+var channel = newGrpcConnection();
+
+var gateway = Gateway.newInstance()
+    .identity(newIdentity())
+    .signer(newSigner())
+    .hash(Hash.SHA256)
+    .connection(channel)
+    .connect();
+
+private static Identity newIdentity() throws IOException, CertificateException {
+    try (var certReader = Files.newBufferedReader(CERT_PATH)) {
+        var certificate = Identities.readX509Certificate(certReader);
+        return new X509Identity("Org1MSP", certificate);
+    }
+}
+
+private static Signer newSigner() throws IOException, InvalidKeyException {
+    try (var keyReader = Files.newBufferedReader(KEY_PATH)) {
+        var privateKey = Identities.readPrivateKey(keyReader);
+        return Signers.newPrivateKeySigner(privateKey);
+    }
+}
+```
+
+</CodeGroup>
+
+### Step 3 — Access the network and contract
+
+Get a reference to the channel (`Network`) and the deployed chaincode (`Contract`):
+
+<CodeGroup>
+
+```typescript TypeScript
+const network = gateway.getNetwork(channelName);
+const contract = network.getContract(chaincodeName);
+```
+
+```go Go
+network := gw.GetNetwork(channelName)
+contract := network.GetContract(chaincodeName)
+```
+
+```java Java
+var network = gateway.getNetwork(CHANNEL_NAME);
+var contract = network.getContract(CHAINCODE_NAME);
+```
+
+</CodeGroup>
+
+If a chaincode package contains multiple smart contracts, specify both the chaincode name and the smart contract name:
+
+<CodeGroup>
+
+```typescript TypeScript
+const contract = network.getContract(chaincodeName, smartContractName);
+```
+
+```go Go
+contract := network.GetContractWithName(chaincodeName, smartContractName)
+```
+
+```java Java
+var contract = network.getContract(CHAINCODE_NAME, SMART_CONTRACT_NAME);
+```
+
+</CodeGroup>
+
+---
+
+## Submitting transactions
+
+`SubmitTransaction` endorses the transaction, submits it to the ordering service, and waits for the commit to be confirmed before returning. Use it for any operation that changes ledger state.
+
+### Initialize the ledger
+
+<CodeGroup>
+
+```typescript TypeScript
+await contract.submitTransaction('InitLedger');
+```
+
+```go Go
+_, err := contract.SubmitTransaction("InitLedger")
+if err != nil {
+    panic(fmt.Errorf("failed to submit transaction: %w", err))
+}
+```
+
+```java Java
+contract.submitTransaction("InitLedger");
+```
+
+</CodeGroup>
+
+### Create an asset
+
+<CodeGroup>
+
+```typescript TypeScript
+const assetId = `asset${String(Date.now())}`;
+
+await contract.submitTransaction(
+    'CreateAsset',
+    assetId,
+    'yellow',
+    '5',
+    'Tom',
+    '1300',
+);
+```
+
+```go Go
+assetId := fmt.Sprintf("asset%d", now.Unix()*1e3+int64(now.Nanosecond())/1e6)
+
+_, err := contract.SubmitTransaction("CreateAsset", assetId, "yellow", "5", "Tom", "1300")
+if err != nil {
+    panic(fmt.Errorf("failed to submit transaction: %w", err))
+}
+```
+
+```java Java
+private final String assetId = "asset" + Instant.now().toEpochMilli();
+
+contract.submitTransaction("CreateAsset", assetId, "yellow", "5", "Tom", "1300");
+```
+
+</CodeGroup>
+
+<Note>
+  Arguments must match the chaincode function's expected signature exactly, in order. For `CreateAsset` the expected sequence is: `ID, Color, Size, Owner, AppraisedValue`.
+</Note>
+
+### Transfer an asset (async)
+
+Use `SubmitAsync` to submit a transaction and continue working while waiting for the commit:
+
+<CodeGroup>
+
+```typescript TypeScript
+const commit = await contract.submitAsync('TransferAsset', {
+    arguments: [assetId, 'Saptha'],
+});
+const oldOwner = utf8Decoder.decode(commit.getResult());
+
+console.log(`*** Submitted transfer from ${oldOwner} to Saptha`);
+console.log('*** Waiting for transaction commit');
+
+const status = await commit.getStatus();
+if (!status.successful) {
+    throw new Error(
+        `Transaction ${status.transactionId} failed with status ${String(status.code)}`
+    );
+}
+
+console.log('*** Transaction committed successfully');
+```
+
+```go Go
+submitResult, commit, err := contract.SubmitAsync("TransferAsset",
+    client.WithArguments(assetId, "Mark"))
+if err != nil {
+    panic(fmt.Errorf("failed to submit transaction asynchronously: %w", err))
+}
+
+fmt.Printf("*** Submitted transfer from %s to Mark\n", string(submitResult))
+fmt.Println("*** Waiting for transaction commit.")
+
+if commitStatus, err := commit.Status(); err != nil {
+    panic(fmt.Errorf("failed to get commit status: %w", err))
+} else if !commitStatus.Successful {
+    panic(fmt.Errorf("transaction %s failed to commit with status: %d",
+        commitStatus.TransactionID, int32(commitStatus.Code)))
+}
+
+fmt.Println("*** Transaction committed successfully")
+```
+
+```java Java
+var commit = contract.newProposal("TransferAsset")
+    .addArguments(assetId, "Saptha")
+    .build()
+    .endorse()
+    .submitAsync();
+
+var result = commit.getResult();
+var oldOwner = new String(result, StandardCharsets.UTF_8);
+
+System.out.println("*** Submitted transfer from " + oldOwner + " to Saptha");
+System.out.println("*** Waiting for transaction commit");
+
+var status = commit.getStatus();
+if (!status.isSuccessful()) {
+    throw new RuntimeException("Transaction " + status.getTransactionId() +
+        " failed with status code " + status.getCode());
+}
+
+System.out.println("*** Transaction committed successfully");
+```
+
+</CodeGroup>
+
+---
+
+## Evaluating transactions (queries)
+
+`EvaluateTransaction` invokes the smart contract on a single peer and returns the result without writing to the ledger. Use it for all read operations.
+
+The Gateway preferentially selects a peer in the same organization as the gateway and chooses the peer with the highest block height.
+
+<CodeGroup>
+
+```typescript TypeScript
+// Query all assets
+const resultBytes = await contract.evaluateTransaction('GetAllAssets');
+const result = JSON.parse(utf8Decoder.decode(resultBytes));
+console.log('*** Result:', result);
+
+// Query a single asset
+const assetBytes = await contract.evaluateTransaction('ReadAsset', assetId);
+const asset = JSON.parse(utf8Decoder.decode(assetBytes));
+console.log('*** Result:', asset);
+```
+
+```go Go
+// Query all assets
+evaluateResult, err := contract.EvaluateTransaction("GetAllAssets")
+if err != nil {
+    panic(fmt.Errorf("failed to evaluate transaction: %w", err))
+}
+fmt.Printf("*** Result:%s\n", formatJSON(evaluateResult))
+
+// Query a single asset
+evaluateResult, err = contract.EvaluateTransaction("ReadAsset", assetId)
+if err != nil {
+    panic(fmt.Errorf("failed to evaluate transaction: %w", err))
+}
+fmt.Printf("*** Result:%s\n", formatJSON(evaluateResult))
+```
+
+```java Java
+// Query all assets
+var result = contract.evaluateTransaction("GetAllAssets");
+System.out.println("*** Result: " + prettyJson(result));
+
+// Query a single asset
+var evaluateResult = contract.evaluateTransaction("ReadAsset", assetId);
+System.out.println("*** Result:" + prettyJson(evaluateResult));
+```
+
+</CodeGroup>
+
+<Note>
+  Transaction functions always return raw bytes. Your application is responsible for decoding the result — typically from a UTF-8 encoded JSON string.
+</Note>
+
+Example `GetAllAssets` output:
+
+```json
+[
+  { "AppraisedValue": 300, "Color": "blue",   "ID": "asset1", "Owner": "Tomoko",  "Size": 5  },
+  { "AppraisedValue": 400, "Color": "red",    "ID": "asset2", "Owner": "Brad",    "Size": 5  },
+  { "AppraisedValue": 500, "Color": "green",  "ID": "asset3", "Owner": "Jin Soo", "Size": 10 },
+  { "AppraisedValue": 600, "Color": "yellow", "ID": "asset4", "Owner": "Max",     "Size": 10 },
+  { "AppraisedValue": 700, "Color": "black",  "ID": "asset5", "Owner": "Adriana", "Size": 15 },
+  { "AppraisedValue": 800, "Color": "white",  "ID": "asset6", "Owner": "Michel",  "Size": 15 }
+]
+```
+
+---
+
+## Error handling
+
+`SubmitTransaction` failures indicate exactly where in the submit flow the error occurred. A well-written application handles each type specifically.
+
+The following example submits a transaction that references a non-existent asset ID to demonstrate the error types:
+
+<CodeGroup>
+
+```typescript TypeScript
+try {
+    await contract.submitTransaction(
+        'UpdateAsset',
+        'asset70',  // does not exist
+        'blue', '5', 'Tomoko', '300',
+    );
+    console.log('******** FAILED to return an error');
+} catch (error) {
+    console.log('*** Successfully caught the error: \n', error);
+}
+```
+
+```go Go
+_, err := contract.SubmitTransaction("UpdateAsset", "asset70", "blue", "5", "Tomoko", "300")
+if err == nil {
+    panic("******** FAILED to return an error")
+}
+
+fmt.Println("*** Successfully caught the error:")
+
+var commitStatusErr *client.CommitStatusError
+var transactionErr *client.TransactionError
+
+switch {
+case errors.As(err, &commitStatusErr):
+    if errors.Is(err, context.DeadlineExceeded) {
+        fmt.Printf("Timeout waiting for transaction %s commit status: %s\n",
+            commitStatusErr.TransactionID, commitStatusErr)
+    } else {
+        fmt.Printf("Error obtaining commit status for transaction %s with gRPC status %v: %s\n",
+            commitStatusErr.TransactionID, status.Code(commitStatusErr), commitStatusErr)
+    }
+case errors.As(err, &transactionErr):
+    // EndorseError, SubmitError, or CommitError
+    fmt.Println(err)
+    fmt.Printf("TransactionID: %s\n", transactionErr.TransactionID)
+default:
+    panic(fmt.Errorf("unexpected error type %T: %w", err, err))
+}
+```
+
+```java Java
+try {
+    contract.submitTransaction("UpdateAsset", "asset70", "blue", "5", "Tomoko", "300");
+    System.out.println("******** FAILED to return an error");
+} catch (EndorseException | SubmitException | CommitStatusException e) {
+    System.out.println("*** Successfully caught the error:");
+    e.printStackTrace(System.out);
+    System.out.println("Transaction ID: " + e.getTransactionId());
+} catch (CommitException e) {
+    System.out.println("*** Successfully caught the error:");
+    e.printStackTrace(System.out);
+    System.out.println("Transaction ID: " + e.getTransactionId());
+    System.out.println("Status code: " + e.getCode());
+}
+```
+
+</CodeGroup>
+
+Example error output (TypeScript):
+
+```text
+*** Successfully caught the error:
+EndorseError: 10 ABORTED: failed to endorse transaction, see attached details for more info
+    at ... {
+  code: 10,
+  details: [
+    {
+      address: 'peer0.org1.example.com:7051',
+      message: 'chaincode response 500, the asset asset70 does not exist',
+      mspId: 'Org1MSP'
+    }
+  ],
+  transactionId: 'a92980d41eef1d6492d63acd5fbb6ef1db0f53252330ad28e548fedfdb9167fe'
+}
+```
+
+### Error type reference
+
+| Error type | gRPC status | Meaning |
+|---|---|---|
+| `EndorseError` | `ABORTED` | Chaincode rejected the transaction during endorsement |
+| `EndorseError` | `UNAVAILABLE` / `DEADLINE_EXCEEDED` | Gateway could not reach the peer — consider retrying |
+| `SubmitError` | — | Error broadcasting the endorsed transaction to the orderer |
+| `CommitStatusError` | `DEADLINE_EXCEEDED` | Timed out waiting for commit confirmation |
+| `CommitException` (Java) | — | Transaction was committed but marked invalid |
+
+---
+
+## Clean up
+
+When you are done, bring down the test network:
+
+```bash
+cd fabric-samples/test-network
+./network.sh down
+```
+
+This stops all nodes and removes all ledger data. Run `./network.sh up createChannel -ca` again to start fresh.
+
+---
+
+## Summary
+
+You have seen how a Fabric client application:
+
+1. Opens a gRPC connection to a Fabric Gateway peer
+2. Creates a `Gateway` connection using an X.509 identity and private key
+3. Accesses a channel (`Network`) and deployed chaincode (`Contract`)
+4. Calls `SubmitTransaction` to write to the ledger (endorse → order → commit)
+5. Calls `EvaluateTransaction` to read from the ledger (query only, no ordering)
+6. Handles typed errors that indicate exactly where in the transaction flow a failure occurred

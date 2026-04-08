@@ -1,0 +1,137 @@
+---
+title: "Deployment overview"
+description: "A high-level guide to planning and deploying a production Hyperledger Fabric network, covering topology, infrastructure, CAs, and the recommended deployment sequence."
+---
+
+Deploying a production Fabric network is a multi-step process that requires planning across Certificate Authorities, MSPs, peers, orderers, channels, and chaincode. This page gives you the conceptual map before you dive into the component-specific guides.
+
+<Note>
+  The Fabric test network is useful for learning but makes assumptions that are not appropriate for production — including single-node ordering, `cryptogen`-generated keys, and no TLS. Do not use it as a production blueprint.
+</Note>
+
+## Production vs. test networks
+
+| Concern | Test network | Production network |
+|---|---|---|
+| Certificate generation | `cryptogen` tool | Fabric CA (TLS CA + enrollment CA) |
+| TLS | Optional | Required on all nodes |
+| Ordering service | Single node | 3 or 5 Raft nodes minimum |
+| Peers per org | 1 | 2+ for high availability |
+| Storage | Ephemeral container storage | Persistent volumes |
+| Container orchestration | Docker Compose | Kubernetes (recommended) |
+| Secret management | Plaintext files | Kubernetes Secrets or HSM |
+
+## Step 1: Decide on your network topology
+
+Before deploying any component, answer these questions:
+
+- **How many organizations** will participate, and which own peers vs. ordering nodes?
+- **How many peers per organization** are needed to satisfy your endorsement policies and availability requirements?
+- **Which state database** — `goleveldb` (default, embedded) or CouchDB (required for JSON rich queries)? All peers on a channel must use the same database type.
+- **How many ordering nodes** — 3 nodes tolerate 1 failure; 5 nodes tolerate 2. Clusters beyond ~50 channels per orderer begin to see performance degradation.
+- **Channel structure** — fewer channels with private data collections, or more channels for isolation?
+- **Chaincode deployment method** — built-in, external builder, or external chaincode service?
+
+<Note>
+  Peers typically need approximately three times the resources of a single ordering node. A CA needs roughly one-tenth the resources of a peer. Plan persistent storage for ledgers, snapshots, and MSP material — container-local storage will be lost when a container restarts.
+</Note>
+
+## Step 2: Set up your cluster
+
+Fabric is container-agnostic but Kubernetes is the most widely used platform for production deployments. Key infrastructure decisions:
+
+<CardGroup cols={2}>
+  <Card title="Kubernetes" icon="server">
+    Use Persistent Volumes (PVs) and Persistent Volume Claims (PVCs) for ledger and MSP storage. Store sensitive config in Kubernetes Secrets. Use separate containers for the peer process, CouchDB, chaincode launcher, and logging.
+  </Card>
+  <Card title="Resource sizing" icon="gauge">
+    Start with a proof-of-concept under load to calibrate CPU, memory, and storage. As peers join more channels, their resource needs grow. Monitor with Prometheus or StatsD from day one.
+  </Card>
+</CardGroup>
+
+**Best practices:**
+
+- Mount certificate volumes external to the node container so they survive container restarts and upgrades.
+- Use network policies or firewalls — peers need access to ordering service nodes on the channels where they receive blocks.
+- Plan for autoscaling storage; orderer and peer ledgers grow indefinitely.
+
+## Step 3: Set up Certificate Authorities
+
+CAs must be deployed before any other component, because every node and admin identity requires certificates before the node can start.
+
+Each organization needs at minimum two CAs:
+
+- **TLS CA** — issues TLS certificates used to secure all inter-node communications. Deploy this first.
+- **Enrollment CA (ecert CA)** — issues signing certificates and MSP material for admins, peers, and orderers. Its bootstrap configuration includes the TLS CA root certificate, so the TLS CA must exist first.
+
+<Note>
+  The `cryptogen` tool must never be used to generate identities in a production environment. Use Fabric CA or another PKI tool that produces Elliptic Curve (EC) certificates.
+</Note>
+
+You may also use **intermediate CAs** to limit the blast radius of a root CA compromise. LDAP integration is available for organizations that already manage identities through a directory service.
+
+## Step 4: Create identities and MSPs
+
+With your CAs running, create the MSP material for each organization:
+
+1. Register and enroll the **organization admin** identity. The admin certificate must be created before the node's local MSP, because the admin cert is embedded in the local MSP.
+2. Register and enroll each **peer identity** with both the enrollment CA (signing cert) and the TLS CA (TLS cert).
+3. Register and enroll each **ordering node identity** with both CAs.
+4. Assemble the **organization MSP** folder structure used when joining channels.
+
+## Step 5: Deploy nodes and build the network
+
+<Steps>
+  <Step title="Deploy CAs">
+    Start the TLS CA first. Then start the enrollment CA, using the TLS CA root certificate in its configuration. Enroll the CA admin identities.
+  </Step>
+  <Step title="Create MSPs and identities">
+    Use the Fabric CA client to register and enroll all admin, peer, and orderer identities. Assemble local MSP folders for each node following the recommended directory structure.
+  </Step>
+  <Step title="Deploy orderers">
+    Configure `orderer.yaml` for each node (or use `ORDERER_GENERAL_*` environment variable overrides). Set `ChannelParticipation.Enabled: true`. Start each orderer with `orderer start`. See [Deploying the ordering service](/deployment/orderer) for details.
+  </Step>
+  <Step title="Deploy peers">
+    Configure `core.yaml` for each peer (or use `CORE_PEER_*` environment variable overrides). Start each peer with `peer node start`. See [Deploying peers](/deployment/peers) for details.
+  </Step>
+  <Step title="Create channels">
+    Use `osnadmin channel join` to join each orderer to a channel. Then join peer organizations to the channel using the peer CLI.
+  </Step>
+  <Step title="Deploy chaincode">
+    Use the Fabric chaincode lifecycle (`peer lifecycle chaincode`) to package, install, approve, and commit chaincode on each channel.
+  </Step>
+</Steps>
+
+## Key configuration files
+
+| File | Used by | Purpose |
+|---|---|---|
+| `core.yaml` | Peer | All peer configuration: identity, TLS, gossip, ledger, chaincode, operations |
+| `orderer.yaml` | Orderer | All orderer configuration: identity, TLS, consensus, ledger, admin API |
+| `configtx.yaml` | Channel admin | Channel and consortium policy definitions, MSP references |
+
+<Tip>
+  Derive environment variable names from YAML parameter paths by uppercasing, replacing dots and nesting with underscores, then prefixing with `CORE_` (peers) or `ORDERER_` (orderers). For example, `peer.localMspId` in `core.yaml` becomes `CORE_PEER_LOCALMSPID`, and `General.LocalMSPID` in `orderer.yaml` becomes `ORDERER_GENERAL_LOCALMSPID`.
+</Tip>
+
+## High availability recommendations
+
+- Deploy **at least two peers per organization** on separate VMs or nodes, so one can go down for maintenance without halting endorsements.
+- Configure **service discovery** so client applications automatically route to available peers.
+- Run **3 or 5 Raft ordering nodes** distributed across failure domains (availability zones or data centers).
+- Use **persistent storage** for ledgers, MSPs, WAL, and snapshots — losing this data requires a full resync or restore from backup.
+- Back up MSP material and ledger snapshots regularly.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Deploying peers" href="/deployment/peers">
+    Configure core.yaml, start a peer, join a channel, and set up CouchDB.
+  </Card>
+  <Card title="Deploying the ordering service" href="/deployment/orderer">
+    Configure orderer.yaml, bootstrap a Raft cluster, and use osnadmin.
+  </Card>
+  <Card title="Security and TLS" href="/deployment/security-and-tls">
+    Enable TLS, configure mTLS, and protect private keys with an HSM.
+  </Card>
+</CardGroup>

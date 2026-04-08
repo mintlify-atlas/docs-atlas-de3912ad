@@ -1,0 +1,141 @@
+---
+title: "cryptogen"
+description: "Generate test cryptographic material for Hyperledger Fabric networks."
+---
+
+`cryptogen` generates X.509 certificates and keys for use in test Fabric networks. It is a convenience tool for development and testing — **do not use it for production networks**.
+
+<Warning>
+For production networks, use the Fabric CA to generate certificates. `cryptogen` does not support certificate renewal, revocation, or the MSP structures required for a properly managed production deployment.
+</Warning>
+
+## Subcommands
+
+### cryptogen generate
+
+Generate cryptographic material from a configuration file:
+
+```bash
+cryptogen generate \
+  --config=./crypto-config.yaml \
+  --output=./crypto-config
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | — | Path to the crypto-config.yaml template |
+| `--output` | `crypto-config` | Output directory for generated artifacts |
+
+### cryptogen showtemplate
+
+Print a sample `crypto-config.yaml` to stdout:
+
+```bash
+cryptogen showtemplate
+```
+
+Use this as a starting point for your own configuration.
+
+### cryptogen extend
+
+Add new users or organizations to an existing crypto material directory:
+
+```bash
+cryptogen extend \
+  --input=./crypto-config \
+  --config=./additional-orgs.yaml
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input` | `crypto-config` | Directory containing existing crypto material |
+| `--config` | — | Configuration template for new material |
+
+### cryptogen version
+
+```bash
+cryptogen version
+```
+
+## crypto-config.yaml format
+
+```yaml crypto-config.yaml
+# Orderer organizations
+OrdererOrgs:
+  - Name: Orderer
+    Domain: example.com
+    EnableNodeOUs: true
+    Specs:
+      - Hostname: orderer
+        SANS:
+          - localhost
+          - 127.0.0.1
+
+# Peer organizations
+PeerOrgs:
+  - Name: Org1
+    Domain: org1.example.com
+    EnableNodeOUs: true
+    # Number of peers to generate (peer0, peer1, ...)
+    Template:
+      Count: 2
+      SANS:
+        - localhost
+        - 127.0.0.1
+    # Additional user certificates beyond Admin
+    Users:
+      Count: 1
+
+  - Name: Org2
+    Domain: org2.example.com
+    EnableNodeOUs: true
+    Template:
+      Count: 2
+      SANS:
+        - localhost
+        - 127.0.0.1
+    Users:
+      Count: 1
+```
+
+### Key fields
+
+| Field | Description |
+|-------|-------------|
+| `Name` | Organization name |
+| `Domain` | Base DNS domain for the org |
+| `EnableNodeOUs` | Embed peer/orderer/client/admin roles in certificates via OU |
+| `Template.Count` | Number of peers to generate |
+| `Users.Count` | Number of additional user certs (Admin is always generated) |
+| `Specs` | Explicit hostname list (alternative to `Template.Count`) |
+| `SANS` | Subject Alternative Names added to all certificates |
+
+## Generated directory structure
+
+After running `cryptogen generate`, the output directory contains:
+
+```
+crypto-config/
+├── ordererOrganizations/
+│   └── example.com/
+│       ├── ca/           # Root CA cert and key
+│       ├── msp/          # Channel MSP for the orderer org
+│       ├── orderers/
+│       │   └── orderer.example.com/
+│       │       ├── msp/  # Local MSP
+│       │       └── tls/  # TLS cert and key
+│       ├── tlsca/        # TLS CA cert and key
+│       └── users/
+└── peerOrganizations/
+    └── org1.example.com/
+        ├── ca/
+        ├── msp/
+        ├── peers/
+        │   └── peer0.org1.example.com/
+        │       ├── msp/
+        │       └── tls/
+        ├── tlsca/
+        └── users/
+            ├── Admin@org1.example.com/
+            └── User1@org1.example.com/
+```

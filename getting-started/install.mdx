@@ -1,0 +1,176 @@
+---
+title: Install Fabric
+description: Download the Fabric binaries, Docker images, and fabric-samples repository using the install script.
+---
+
+This page explains how to install the Hyperledger Fabric binaries, Docker images, and the `fabric-samples` repository on your local machine. Before proceeding, make sure you have completed the [prerequisites](/getting-started/prerequisites).
+
+The `install-fabric.sh` script handles the entire setup process in one step. It will:
+
+- Clone the [hyperledger/fabric-samples](https://github.com/hyperledger/fabric-samples) repository.
+- Pull the latest Hyperledger Fabric Docker images and tag them as `latest`.
+- Download the platform-specific Fabric CLI binaries and config files into `fabric-samples/bin` and `fabric-samples/config`.
+
+## CLI binaries included
+
+The following binaries are downloaded into the `bin` directory of `fabric-samples`:
+
+| Binary | Purpose |
+|---|---|
+| `peer` | Interact with peer nodes |
+| `orderer` | Run the ordering service |
+| `osnadmin` | Manage orderer system channel |
+| `configtxgen` | Generate channel configuration artifacts |
+| `configtxlator` | Translate configuration formats |
+| `cryptogen` | Generate test crypto material |
+| `discover` | Query network topology |
+| `ledgerutil` | Utilities for ledger comparison |
+| `fabric-ca-client` | Interact with a Fabric CA |
+| `fabric-ca-server` | Run a Fabric CA |
+
+---
+
+## Install
+
+<Steps>
+  <Step title="Create a working directory">
+    Choose a directory to hold your Fabric projects. Go developers typically use the standard Go project layout:
+
+    ```bash
+    mkdir -p $HOME/go/src/github.com/<your_github_userid>
+    cd $HOME/go/src/github.com/<your_github_userid>
+    ```
+
+    Any directory will work — the Go path is just a common convention.
+  </Step>
+
+  <Step title="Download the install script">
+    ```bash
+    curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh \
+      && chmod +x install-fabric.sh
+    ```
+  </Step>
+
+  <Step title="Run the install script">
+    Run the script with no arguments to install all components (Docker images, binaries, and fabric-samples):
+
+    ```bash
+    ./install-fabric.sh
+    ```
+
+    This is equivalent to:
+
+    ```bash
+    ./install-fabric.sh docker binary samples
+    ```
+
+    You can also use single-letter shorthand:
+
+    ```bash
+    ./install-fabric.sh d b s
+    ```
+  </Step>
+
+  <Step title="Add the binaries to your PATH">
+    The binaries are placed in `fabric-samples/bin`. Add this directory to your `PATH` so you can run them from any location within the `test-network` directory:
+
+    ```bash
+    export PATH=${PWD}/../bin:$PATH
+    ```
+
+    Also set `FABRIC_CFG_PATH` to point to the sample configuration files:
+
+    ```bash
+    export FABRIC_CFG_PATH=$PWD/../config/
+    ```
+
+    <Tip>
+      Add both `export` commands to your shell profile (e.g., `~/.bashrc` or `~/.zshrc`) to make them permanent, or re-run them each time you open a new terminal for Fabric work.
+    </Tip>
+  </Step>
+
+  <Step title="Verify the installation">
+    Check that the peer binary is available and shows the expected version:
+
+    ```bash
+    peer version
+    ```
+
+    You should see output similar to:
+
+    ```text
+    peer:
+     Version: 2.5.15
+     Commit SHA: ...
+     Go version: go1.26.1
+     ...
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Choosing components
+
+You can install only the components you need by passing one or more arguments to the script.
+
+| Argument | Short form | What it installs |
+|---|---|---|
+| `docker` | `d` | Fabric Docker images (pulled via Docker) |
+| `podman` | — | Fabric Docker images (pulled via Podman) |
+| `binary` | `b` | Fabric CLI binaries |
+| `samples` | `s` | The `fabric-samples` GitHub repository |
+
+```bash
+# Install only Docker images and binaries (skip samples)
+./install-fabric.sh docker binary
+
+# Install only the fabric-samples repo
+./install-fabric.sh samples
+```
+
+---
+
+## Choosing a version
+
+By default, the script installs the latest release. To pin a specific version, use `--fabric-version` (`-f`) and `--ca-version` (`-c`):
+
+```bash
+# Install Fabric v2.5.15 binaries only
+./install-fabric.sh --fabric-version 2.5.15 binary
+
+# Install a specific Fabric version and a specific CA version
+./install-fabric.sh -f 2.5.15 -c 1.5.17 docker binary samples
+```
+
+Run the script with `-h` to see all available options:
+
+```bash
+./install-fabric.sh -h
+```
+
+```text
+Usage: ./install-fabric.sh [-f|--fabric-version <arg>] [-c|--ca-version <arg>] <comp-1> [<comp-2>] ...
+        <comp>: Component to install one or more of  d[ocker]|b[inary]|s[amples]. If none specified, all will be installed
+        -f, --fabric-version: FabricVersion (default: '2.5.15')
+        -c, --ca-version: Fabric CA Version (default: '1.5.17')
+```
+
+<Note>
+  An older `bootstrap.sh` script is still available at the same URL for backwards compatibility. The `install-fabric.sh` script is the recommended replacement — it produces the same end result but with clearer component selection syntax.
+
+  ```bash
+  # Legacy script (still works)
+  curl -sSL https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/bootstrap.sh | bash -s
+  ```
+</Note>
+
+---
+
+## Next steps
+
+With Fabric installed, you are ready to launch the test network.
+
+<Card title="Using the test network" href="/getting-started/test-network" icon="network">
+  Bring up a local Fabric network, create a channel, deploy chaincode, and interact with the ledger.
+</Card>

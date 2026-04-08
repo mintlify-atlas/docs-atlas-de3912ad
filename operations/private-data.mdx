@@ -1,0 +1,313 @@
+---
+title: "Private data"
+description: "Learn how Hyperledger Fabric private data collections keep sensitive transaction data off the shared ledger while recording a verifiable hash, including collection policy format, chaincode APIs, purging, and when to use private data vs. separate channels."
+---
+
+## What is private data?
+
+Private data collections let a defined subset of organizations on a channel endorse, commit, and query sensitive data **without creating a separate channel**. The raw data never reaches unauthorized peers or the ordering service — only a **hash of the data** is recorded on the shared channel ledger.
+
+A private data collection combines two elements:
+
+1. **The actual private data** — distributed peer-to-peer via gossip only to authorized organizations and stored in a private state database on each authorized peer.
+2. **A hash of that data** — endorsed, ordered, and written to the ledger on every peer in the channel, providing immutable evidence of the transaction without exposing the content.
+
+<Note>
+Because private data is distributed peer-to-peer rather than through blocks, anchor peers must be configured and `CORE_PEER_GOSSIP_EXTERNALENDPOINT` must be set on each peer so that cross-organization gossip can bootstrap.
+</Note>
+
+## Private data vs. separate channels
+
+<CardGroup cols={2}>
+  <Card title="Use a separate channel when" icon="lock">
+    The entire transaction and ledger must be confidential to a fixed set of organizations. Channel separation provides the strongest isolation but adds administrative overhead (separate chaincode, MSPs, policies per channel).
+  </Card>
+  <Card title="Use private data collections when" icon="filter">
+    Transactions and their public metadata are visible to all channel members, but only a subset should see the sensitive data within those transactions. Private data also keeps data confidential from ordering service nodes.
+  </Card>
+</CardGroup>
+
+A common pattern: use a single channel for all organizations with multiple private data collections for different bilateral or multilateral data-sharing relationships, rather than creating many small channels.
+
+## Collection policy definition
+
+Collections are defined in a JSON file referenced in the chaincode definition. Each collection entry includes:
+
+```json
+[
+  {
+    "name": "distributorFarmerShipper",
+    "policy": "OR('DistributorMSP.member', 'FarmerMSP.member', 'ShipperMSP.member')",
+    "requiredPeerCount": 1,
+    "maxPeerCount": 3,
+    "blockToLive": 1000000,
+    "memberOnlyRead": true,
+    "memberOnlyWrite": false,
+    "endorsementPolicy": {
+      "signaturePolicy": "OR('DistributorMSP.peer', 'FarmerMSP.peer')"
+    }
+  },
+  {
+    "name": "distributorWholesaler",
+    "policy": "OR('DistributorMSP.member', 'WholesalerMSP.member')",
+    "requiredPeerCount": 1,
+    "maxPeerCount": 2,
+    "blockToLive": 0,
+    "memberOnlyRead": true,
+    "memberOnlyWrite": true
+  }
+]
+```
+
+### Collection policy fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique collection name within this chaincode. Used as the namespace for `GetPrivateData`/`PutPrivateData` calls. |
+| `policy` | Yes | Signature policy expression defining which organizations are authorized to **receive and store** the private data. |
+| `requiredPeerCount` | Yes | Minimum number of authorized peers that must receive the private data before the endorsing peer returns a successful response to the client. |
+| `maxPeerCount` | Yes | Maximum number of peers the endorsing peer will attempt to disseminate private data to during endorsement. |
+| `blockToLive` | Yes | Number of blocks after which private data is automatically purged. Set to `0` to retain data indefinitely. |
+| `memberOnlyRead` | No | If `true`, only collection members can read the private data via chaincode. Non-members invoking a read will receive an error. |
+| `memberOnlyWrite` | No | If `true`, only collection members can write to the private data via chaincode. |
+| `endorsementPolicy` | No | Collection-level endorsement policy that overrides the chaincode-level policy for writes to this collection. Introduced in Fabric v2.0. |
+
+<Warning>
+`requiredPeerCount` must be greater than `0` to ensure the private data is disseminated before block commit. If this is `0`, private data may not reach authorized peers before the block is committed, causing reconciliation delays.
+</Warning>
+
+## Transaction flow with private data
+
+<Steps>
+  <Step title="Client submits a proposal with transient data">
+    The client application sends the transaction proposal to the Fabric Gateway, passing sensitive inputs in the `transient` field of the proposal. Transient data is never included in the transaction that gets ordered — it stays on endorsing peers only.
+  </Step>
+  <Step title="Endorsing peers simulate and store private data">
+    Endorsing peers execute the chaincode, which reads and writes from the private state database. They store private data in a temporary `transient data store` and disseminate it peer-to-peer via gossip to other authorized collection members.
+  </Step>
+  <Step title="Endorsers return hashes, not private data">
+    The proposal response returned to the gateway contains the read-write set with **hashes** of private data keys and values. No raw private data leaves the endorsing peer.
+  </Step>
+  <Step title="Transaction is ordered with hashes">
+    The gateway assembles the endorsed transaction (containing only public data and private data hashes) and submits it to the ordering service. The ordering service packages it into a block as usual.
+  </Step>
+  <Step title="Peers commit and reconcile private data">
+    At commit time, authorized peers check their transient store for the private data they received during endorsement. If not found, they pull it from another authorized peer. They validate the private data against the hashes in the block before writing it to the private state database.
+  </Step>
+</Steps>
+
+## Chaincode APIs for private data
+
+Use the `stub` (shim) APIs in your chaincode to read and write private data:
+
+<Tabs>
+  <Tab title="Go">
+    ```go
+    import "github.com/hyperledger/fabric-contract-api-go/contractapi"
+
+    // Write private data to a collection
+    func (c *AssetContract) RecordPrivateAsset(ctx contractapi.TransactionContextInterface) error {
+        transientMap, err := ctx.GetStub().GetTransient()
+        if err != nil {
+            return fmt.Errorf("failed to get transient data: %w", err)
+        }
+
+        assetJSON, ok := transientMap["asset"]
+        if !ok {
+            return fmt.Errorf("asset not found in transient data")
+        }
+
+        return ctx.GetStub().PutPrivateData("distributorFarmerShipper", "asset1", assetJSON)
+    }
+
+    // Read private data from a collection
+    func (c *AssetContract) ReadPrivateAsset(ctx contractapi.TransactionContextInterface, id string) ([]byte, error) {
+        data, err := ctx.GetStub().GetPrivateData("distributorFarmerShipper", id)
+        if err != nil {
+            return nil, fmt.Errorf("failed to read private data: %w", err)
+        }
+        if data == nil {
+            return nil, fmt.Errorf("private data for %s not found", id)
+        }
+        return data, nil
+    }
+
+    // Read the hash of private data (available to non-members)
+    func (c *AssetContract) GetPrivateDataHash(ctx contractapi.TransactionContextInterface, id string) ([]byte, error) {
+        hash, err := ctx.GetStub().GetPrivateDataHash("distributorFarmerShipper", id)
+        if err != nil {
+            return nil, fmt.Errorf("failed to get private data hash: %w", err)
+        }
+        return hash, nil
+    }
+
+    // Delete private data
+    func (c *AssetContract) DeletePrivateAsset(ctx contractapi.TransactionContextInterface, id string) error {
+        return ctx.GetStub().DelPrivateData("distributorFarmerShipper", id)
+    }
+
+    // Purge private data completely (removes from all peers)
+    func (c *AssetContract) PurgePrivateAsset(ctx contractapi.TransactionContextInterface, id string) error {
+        return ctx.GetStub().PurgePrivateData("distributorFarmerShipper", id)
+    }
+    ```
+  </Tab>
+  <Tab title="Node.js">
+    ```typescript
+    import { Context, Contract } from 'fabric-contract-api';
+
+    export class AssetContract extends Contract {
+
+        // Write private data to a collection
+        async recordPrivateAsset(ctx: Context): Promise<void> {
+            const transientMap = ctx.stub.getTransient();
+            const assetBytes = transientMap.get('asset');
+            if (!assetBytes) {
+                throw new Error('asset not found in transient data');
+            }
+
+            await ctx.stub.putPrivateData('distributorFarmerShipper', 'asset1', assetBytes);
+        }
+
+        // Read private data from a collection
+        async readPrivateAsset(ctx: Context, id: string): Promise<Buffer> {
+            const data = await ctx.stub.getPrivateData('distributorFarmerShipper', id);
+            if (!data || data.length === 0) {
+                throw new Error(`Private data for ${id} not found`);
+            }
+            return data;
+        }
+
+        // Get the hash of private data (available to non-members)
+        async getPrivateDataHash(ctx: Context, id: string): Promise<Buffer> {
+            const hash = await ctx.stub.getPrivateDataHash('distributorFarmerShipper', id);
+            if (!hash || hash.length === 0) {
+                throw new Error(`Hash for private data ${id} not found`);
+            }
+            return hash;
+        }
+
+        // Purge private data completely
+        async purgePrivateAsset(ctx: Context, id: string): Promise<void> {
+            await ctx.stub.purgePrivateData('distributorFarmerShipper', id);
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Java">
+    ```java
+    import org.hyperledger.fabric.contract.Context;
+    import org.hyperledger.fabric.contract.ContractInterface;
+    import org.hyperledger.fabric.contract.annotation.Transaction;
+    import org.hyperledger.fabric.shim.ChaincodeStub;
+
+    public class AssetContract implements ContractInterface {
+
+        private static final String COLLECTION = "distributorFarmerShipper";
+
+        // Write private data to a collection
+        @Transaction(intent = Transaction.TYPE.SUBMIT)
+        public void recordPrivateAsset(final Context ctx) {
+            ChaincodeStub stub = ctx.getStub();
+            Map<String, byte[]> transientMap = stub.getTransient();
+            byte[] assetBytes = transientMap.get("asset");
+            if (assetBytes == null) {
+                throw new RuntimeException("asset not found in transient data");
+            }
+            stub.putPrivateData(COLLECTION, "asset1", assetBytes);
+        }
+
+        // Read private data from a collection
+        @Transaction(intent = Transaction.TYPE.EVALUATE)
+        public byte[] readPrivateAsset(final Context ctx, final String id) {
+            byte[] data = ctx.getStub().getPrivateData(COLLECTION, id);
+            if (data == null || data.length == 0) {
+                throw new RuntimeException("Private data for " + id + " not found");
+            }
+            return data;
+        }
+
+        // Get the hash of private data
+        @Transaction(intent = Transaction.TYPE.EVALUATE)
+        public byte[] getPrivateDataHash(final Context ctx, final String id) {
+            return ctx.getStub().getPrivateDataHash(COLLECTION, id);
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+`GetPrivateDataHash()` is available to chaincode running on **non-member** peers. This allows cross-collection verification: a non-member can confirm that a specific private data value exists (by comparing hashes) without accessing the raw data.
+</Note>
+
+## Implicit collections
+
+Starting with Fabric v2.0, every organization automatically has an **implicit private data collection** that can be used by any chaincode without an explicit collection definition. The implicit collection for an organization is referenced using the `_implicit_org_` prefix:
+
+```go
+// Write to the implicit collection for the calling organization
+err := ctx.GetStub().PutPrivateData("_implicit_org_Org1MSP", "key1", valueBytes)
+
+// Read from the implicit collection for a specific org
+data, err := ctx.GetStub().GetPrivateData("_implicit_org_Org2MSP", "key1")
+```
+
+Implicit collections are particularly useful for per-organization approvals and staged multi-party workflows — the same pattern used by Fabric's built-in lifecycle chaincode for chaincode definition approvals.
+
+## Purging private data
+
+Private data can be removed from peers in two ways:
+
+<AccordionGroup>
+  <Accordion title="Automatic purging via blockToLive">
+    Set `blockToLive` in the collection definition to a positive integer. After that many blocks have been committed since the private data was written, the data is automatically purged from peers' private state databases. The on-chain hash remains as permanent evidence.
+
+    ```json
+    {
+      "name": "sensitiveData",
+      "policy": "OR('Org1MSP.member')",
+      "requiredPeerCount": 1,
+      "maxPeerCount": 1,
+      "blockToLive": 100
+    }
+    ```
+  </Accordion>
+  <Accordion title="Manual purging via chaincode">
+    Call `PurgePrivateData(collection, key)` from chaincode to immediately and completely remove private data. Unlike `DelPrivateData`, which only deletes the current value but retains history for block events, `PurgePrivateData` removes all traces from the peer's private database and prevents the data from being returned in block events or pulled by other peers.
+
+    ```go
+    // PurgePrivateData — removes data and all history
+    err := ctx.GetStub().PurgePrivateData("myCollection", "sensitiveKey")
+    
+    // DelPrivateData — removes from state but history remains
+    err := ctx.GetStub().DelPrivateData("myCollection", "sensitiveKey")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+Use `PurgePrivateData` when regulatory requirements (such as GDPR right-to-erasure) require complete removal of data from all authorized peers. `DelPrivateData` alone is insufficient for compliance in these cases.
+</Warning>
+
+## Private data sharing patterns
+
+Because each organization can have its own private collection, rich sharing patterns are possible without defining a large number of multilateral collections:
+
+| Pattern | How it works |
+|---------|--------------|
+| **Hash verification** | Share data out-of-band; the receiver verifies against the on-chain hash using `GetPrivateDataHash()`. |
+| **Collection-to-collection transfer** | Chaincode reads from the source collection, verifies the hash, and writes to the destination collection in a single transaction. |
+| **Pre-approval workflow** | Each party writes its approval to its own collection; chaincode checks all approvals using `GetPrivateDataHash()` before proceeding. |
+| **Implicit org collections** | Use `_implicit_org_<MSPID>` collections for per-org data without pre-defining collections in the chaincode definition. |
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="Channels" href="/operations/channels">
+    When to create separate channels instead of using collections
+  </Card>
+  <Card title="Gateway" href="/operations/gateway">
+    How the Fabric Gateway handles transient data and collection endorsement
+  </Card>
+</CardGroup>

@@ -1,0 +1,161 @@
+---
+title: "ledgerutil"
+description: "Diagnostic tools for comparing ledger snapshots, identifying divergent transactions, and verifying ledger integrity."
+---
+
+`ledgerutil` provides diagnostic utilities for troubleshooting ledger issues on Fabric peers, particularly when the ledgers of two peers on the same channel have diverged.
+
+## Subcommands
+
+| Subcommand | Purpose |
+|------------|---------|
+| `compare` | Compare ledger snapshots from two peers to find divergences |
+| `identifytxs` | Find transactions that wrote to divergent keys |
+| `verify` | Check ledger integrity using hash chains |
+
+## ledgerutil compare
+
+Compare channel snapshots from two different peers. Snapshots at the same height should be identical — if they have different state hashes, at least one peer's state database is corrupted.
+
+```bash
+ledgerutil compare \
+  -o ./compare_output \
+  -f 10 \
+  ./peer0.org1.example.com/snapshots/completed/mychannel/5 \
+  ./peer1.org1.example.com/snapshots/completed/mychannel/5
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o, --outputDir` | Current directory | Directory for comparison output JSON files |
+| `-f, --firstDiffs` | `10` | Max differences to include in the height-ordered output file (0 = skip that file) |
+
+**Output files (when divergences found):**
+- `public_state_comparison.json` — public key/value differences sorted by key
+- `private_state_comparison.json` — private key/value differences sorted by key
+- `first_diffs_by_height.json` — up to N differences sorted by block/transaction height
+
+**Exit codes:** `0` = identical, `2` = different, `1` = error
+
+### Output format
+
+```json
+{
+  "ledgerid": "mychannel",
+  "diffRecords": [
+    {
+      "namespace": "marbles",
+      "key": "marble1",
+      "hashed": false,
+      "snapshotrecord1": {
+        "value": "{\"owner\":\"tom\"}",
+        "blockNum": 3,
+        "txNum": 0
+      },
+      "snapshotrecord2": {
+        "value": "{\"owner\":\"jerry\"}",
+        "blockNum": 4,
+        "txNum": 0
+      }
+    }
+  ]
+}
+```
+
+A `null` value for `snapshotrecord1` or `snapshotrecord2` means the key is missing from that snapshot. `"hashed": true` indicates a private data difference.
+
+## ledgerutil identifytxs
+
+Identify the transactions that wrote to a set of divergent keys. Takes the output of `ledgerutil compare` as input.
+
+```bash
+ledgerutil identifytxs \
+  compare_output/mychannel_5_comparison/first_diffs_by_height.json \
+  -o ./identifytxs_output \
+  /var/hyperledger/production
+```
+
+| Argument/Flag | Default | Description |
+|---------------|---------|-------------|
+| `<snapshotDiffsPath>` | — | Path to the JSON file from `ledgerutil compare` |
+| `[<blockStorePath>]` | `/var/hyperledger/production` | Path to the peer's block store |
+| `-o, --outputDir` | Current directory | Output directory for result files |
+
+**Output:** One JSON file per divergent key (`txlist1.json`, `txlist2.json`, etc.):
+
+```json
+{
+  "namespace": "marbles",
+  "key": "marble1",
+  "txs": [
+    {
+      "txid": "9ccb0d0bf19f143...",
+      "blockNum": 4,
+      "txNum": 0,
+      "txValidationStatus": "VALID",
+      "keyWrite": "{\"owner\":\"tom\"}"
+    }
+  ],
+  "blockStoreHeightSufficient": true
+}
+```
+
+`blockStoreHeightSufficient: false` means the block store does not reach the height of the divergence — results may be incomplete.
+
+**Exit codes:** `0` = success, `1` = error or invalid block range
+
+## ledgerutil verify
+
+Verify ledger integrity by checking hash chains in the block store:
+
+```bash
+ledgerutil verify \
+  ./peer0.org1.example.com/ledgersData/chains \
+  -o ./verify_output
+```
+
+| Argument/Flag | Default | Description |
+|---------------|---------|-------------|
+| `[<blockStorePath>]` | `/var/hyperledger/production` | Path to the peer's block store |
+| `-o, --outputDir` | Current directory | Output directory for result JSON files |
+
+<Warning>
+Run `ledgerutil verify` against a **copy** of the block store, not a running peer's block store directly, to avoid interference.
+</Warning>
+
+**On success:**
+```json
+[]
+```
+
+**On errors:**
+```json
+[
+  {"blockNum": 0, "valid": false, "errors": ["DataHash mismatch"]},
+  {"blockNum": 1, "valid": false, "errors": ["PreviousHash mismatch"]}
+]
+```
+
+## Typical troubleshooting workflow
+
+<Steps>
+  <Step title="Take snapshots from both peers">
+    Use `peer snapshot submitrequest` to create snapshots at the same block height from two peers on the same channel.
+  </Step>
+  <Step title="Compare the snapshots">
+    ```bash
+    ledgerutil compare -o ./output -f 20 \
+      ./peer0/snapshots/mychannel/100 \
+      ./peer1/snapshots/mychannel/100
+    ```
+  </Step>
+  <Step title="Identify transactions for divergent keys">
+    ```bash
+    ledgerutil identifytxs ./output/mychannel_100_comparison/first_diffs_by_height.json \
+      -o ./txs_output ./peer0/ledgersData/chains
+    ```
+  </Step>
+  <Step title="Review transactions and check peer logs">
+    Use the transaction IDs from the output to cross-reference peer logs and identify when and why the divergence occurred.
+  </Step>
+</Steps>

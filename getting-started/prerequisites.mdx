@@ -1,0 +1,239 @@
+---
+title: Prerequisites
+description: Install the software required to run Hyperledger Fabric on your local machine.
+---
+
+Before you can run a Fabric test network, you need the following tools installed. The requirements vary slightly by operating system.
+
+<Warning>
+  Always use the minimum versions listed below. Older versions may produce
+  unexpected errors that are difficult to diagnose.
+</Warning>
+
+## Required software
+
+| Tool | Minimum version | Required for |
+|---|---|---|
+| Git | 2.x | Cloning fabric-samples |
+| cURL | Any recent | Downloading install scripts |
+| Docker | 19.x | Running network nodes |
+| Docker Compose | 1.27 | Orchestrating containers |
+| jq | 1.6 | Channel config utilities and tutorials |
+
+The following are optional depending on your use case:
+
+| Tool | Version | Required for |
+|---|---|---|
+| Go | 1.26.1 | Go chaincode or Go SDK applications |
+| Node.js | 18 LTS or later | Node.js chaincode or applications |
+| Java | 11 or later | Java chaincode or applications |
+
+---
+
+## Installation by platform
+
+<Tabs>
+  <Tab title="macOS">
+    The recommended approach on macOS is to use [Homebrew](https://brew.sh).
+
+    <Steps>
+      <Step title="Install Homebrew">
+        ```bash
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        brew --version
+        ```
+
+        Homebrew will also install the Xcode command line tools, which are needed for building software on macOS.
+      </Step>
+
+      <Step title="Install Git and cURL">
+        ```bash
+        brew install git curl
+        git --version   # => git version 2.23.0
+        curl --version  # => curl 7.64.1 (...)
+        ```
+      </Step>
+
+      <Step title="Install Docker Desktop">
+        <Warning>
+          Do not enable the **gRPC FUSE for file sharing** option in Docker Desktop. Some users have reported errors when running Fabric samples with this option enabled. Use a different file sharing implementation instead.
+        </Warning>
+
+        Install Docker Desktop using Homebrew:
+
+        ```bash
+        # Homebrew v3.x
+        brew install --cask --appdir="/Applications" docker
+        ```
+
+        After installation, open the application to complete setup:
+
+        ```bash
+        open /Applications/Docker.app
+        ```
+
+        Verify the installation:
+
+        ```bash
+        docker --version         # => Docker version 19.03.12
+        docker-compose --version # => docker-compose version 1.27.2
+        ```
+      </Step>
+
+      <Step title="Install jq">
+        jq is required for the tutorials that use the test network's channel configuration scripts.
+
+        ```bash
+        brew install jq
+        jq --version  # => jq-1.6
+        ```
+      </Step>
+
+      <Step title="Install Go (optional)">
+        Only required if you plan to write Go chaincode or use the Go SDK.
+
+        ```bash
+        brew install go@1.26.1
+        go version  # => go1.26.1 darwin/amd64
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Linux (Ubuntu/Debian)">
+    <Steps>
+      <Step title="Install Git, cURL, and Docker Compose">
+        ```bash
+        sudo apt-get update
+        sudo apt-get install git curl docker-compose -y
+        ```
+      </Step>
+
+      <Step title="Start Docker and add your user to the docker group">
+        ```bash
+        # Start the Docker daemon
+        sudo systemctl start docker
+
+        # Add your user to the Docker group (replace <username> with your username)
+        sudo usermod -a -G docker <username>
+
+        # Optionally, enable Docker to start at boot
+        sudo systemctl enable docker
+        ```
+
+        <Note>
+          After running `usermod`, log out and back in for the group membership to take effect. Until then, you may need to prefix Docker commands with `sudo`.
+        </Note>
+
+        Verify:
+
+        ```bash
+        docker --version
+        docker-compose --version
+        ```
+      </Step>
+
+      <Step title="Install jq (optional)">
+        Required for tutorials related to channel configuration transactions.
+
+        ```bash
+        sudo apt-get install jq -y
+        ```
+      </Step>
+
+      <Step title="Install Go (optional)">
+        Only required for Go chaincode or Go SDK applications. Download the latest Fabric-supported version from [go.dev/doc/install](https://go.dev/doc/install) and follow the instructions there.
+
+        The version used by Fabric is **1.26.1**.
+      </Step>
+    </Steps>
+
+    ### SELinux (Fedora, RHEL)
+
+    If you are running a Linux distribution with SELinux enabled (such as Fedora or RHEL), you need to modify the Docker Compose files before starting the test network or you will encounter volume permission errors and Docker socket access errors.
+
+    Add `:z` to the volume entries in the following files:
+
+    - `test-network/compose/compose-ca.yaml`
+    - `test-network/compose/compose-test-net.yaml`
+    - `test-network/compose/docker/docker-compose-test-net.yaml`
+
+    ```yaml
+    # Example: compose-test-net.yaml — orderer container
+    volumes:
+      - ../organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp:/var/hyperledger/orderer/msp:z
+      - ../organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/:/var/hyperledger/orderer/tls:z
+    ```
+
+    Also add `:z` to the Docker socket volume and disable SELinux label enforcement for peer containers:
+
+    ```yaml
+    # test-network/compose/docker/docker-compose-test-net.yaml — peer containers
+    volumes:
+      - ${DOCKER_SOCK}:/host/var/run/docker.sock:z
+    security_opt:
+      - label:disable
+    ```
+
+    <Info>
+      See the [test network page](/getting-started/test-network) for the complete SELinux volume configuration reference.
+    </Info>
+  </Tab>
+
+  <Tab title="Windows (WSL2)">
+    Hyperledger Fabric documentation and samples rely heavily on a Bash environment. The recommended approach on Windows is to use WSL2 (Windows Subsystem for Linux version 2).
+
+    <Steps>
+      <Step title="Enable WSL2">
+        1. Open **Programs and Features** in Control Panel.
+        2. Click **Turn Windows features on or off**.
+        3. Enable both **Windows Subsystem for Linux** and **Virtual Machine Platform**.
+        4. Restart your machine.
+
+        Then install a Linux distribution such as Ubuntu 22.04 from the Microsoft Store and ensure it is set to WSL version 2. See [Install WSL](https://docs.microsoft.com/en-us/windows/wsl/install) for full instructions.
+      </Step>
+
+      <Step title="Install Docker Desktop">
+        Install [Docker Desktop for Windows](https://docs.docker.com/get-docker/).
+
+        After installation, open Docker Desktop settings, navigate to **Resources → WSL Integration**, enable the integration checkbox, and toggle integration on for your WSL2 distribution.
+
+        See [Docker Desktop WSL2 backend](https://docs.docker.com/desktop/windows/wsl/) for details.
+      </Step>
+
+      <Step title="Install Linux prerequisites inside WSL2">
+        Open your WSL2 terminal and follow the **Linux (Ubuntu/Debian)** instructions above — excluding the Docker step, since Docker Desktop already provides the Docker daemon.
+      </Step>
+
+      <Step title="Configure Git for Windows line endings (optional)">
+        If you install Git natively on Windows (rather than relying solely on WSL2), configure it to prevent line ending issues that can break shell scripts:
+
+        ```bash
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+        ```
+
+        Verify:
+
+        ```bash
+        git config --get core.autocrlf  # => false
+        git config --get core.longpaths # => true
+        ```
+      </Step>
+    </Steps>
+
+    <Tip>
+      [VS Code](https://code.visualstudio.com/) with the **Remote Development** extension pack provides excellent integration with WSL2, including the **Remote - WSL** and **Remote - Containers** extensions.
+    </Tip>
+  </Tab>
+</Tabs>
+
+---
+
+## Next steps
+
+Once all prerequisites are installed, install the Fabric binaries, Docker images, and sample applications.
+
+<Card title="Install Fabric" href="/getting-started/install" icon="download">
+  Download the Fabric binaries and Docker images using the install script.
+</Card>

@@ -1,0 +1,274 @@
+---
+title: "Identity and MSP"
+description: "A deep dive into Hyperledger Fabric's identity model, PKI foundations, certificate types, MSP folder structure, organizational units, Node OU roles, intermediate CAs, and how identities map to policies."
+---
+
+## Digital identities in Fabric
+
+Every actor in a Hyperledger Fabric network — peers, orderers, client applications, and administrators — has a **digital identity** encapsulated in an X.509 certificate. These identities are not just for authentication; they **determine the exact permissions over resources and access to information** that actors have in the network.
+
+Fabric extends the identity concept with a **principal**: the union of an identity and its associated attributes. Principals can express properties such as the actor's organization, organizational unit, or role. When policies evaluate who is allowed to do something, they evaluate principals.
+
+## X.509 certificates and PKI basics
+
+Fabric uses a traditional **Public Key Infrastructure (PKI)** hierarchical model based on the X.509 standard.
+
+### The four elements of PKI
+
+<CardGroup cols={2}>
+  <Card title="Digital certificates" icon="id-card">
+    X.509 documents that bind a public key to an identity. They contain fields like `CN`, `O`, `OU`, `C`, and the issuing CA's signature.
+  </Card>
+  <Card title="Public and private keys" icon="key">
+    A cryptographically linked key pair. The private key signs messages; the public key (embedded in the certificate) verifies signatures.
+  </Card>
+  <Card title="Certificate Authorities (CAs)" icon="building">
+    Trusted entities that issue and sign certificates. A CA's signature on a certificate vouches for the identity of the certificate holder.
+  </Card>
+  <Card title="Certificate Revocation Lists (CRLs)" icon="ban">
+    Lists maintained by CAs identifying certificates that have been revoked before their expiration date.
+  </Card>
+</CardGroup>
+
+### How certificates authenticate actors
+
+When a peer signs a transaction proposal, it uses its **private key**. Any party that holds the peer's certificate can verify the signature using the **public key** embedded in that certificate. The certificate itself is signed by the issuing CA, establishing a chain of trust back to a trusted root.
+
+```
+Root CA
+  └── Intermediate CA (optional)
+        └── Peer/Orderer/Admin Certificate
+```
+
+Fabric supports the following cryptographic algorithms for transaction signing and verification:
+
+- **ECDSA** (P-256 and P-384 curves)
+- **Ed25519** (as of v3.0 with V3_0 channel capability)
+
+<Note>
+Hyperledger Fabric does not support RSA keys for node identities, though RSA may appear in CA certificates issued by external CAs. MSP identities never expire; they can only be revoked by adding them to the appropriate CRL.
+</Note>
+
+## Certificate types in Fabric
+
+<AccordionGroup>
+  <Accordion title="Enrollment certificates (signing certs)">
+    The primary identity certificate for a peer, orderer, or client. Stored in the `signcerts` folder of the MSP. Used to sign transactions and proposals. This is the certificate other parties check when verifying signatures.
+  </Accordion>
+  <Accordion title="TLS certificates">
+    Used for securing gRPC communication between nodes (peer-to-peer, peer-to-orderer). Stored separately in `tlscacerts` and `tlsintermediatecacerts`. TLS identity and enrollment identity are kept distinct by best practice.
+  </Accordion>
+  <Accordion title="Admin certificates">
+    In Fabric v1.4.2 and earlier, admin certs were placed explicitly in the `admincerts` folder. Since v1.4.3, the recommended approach is to assign the `admin` Node OU role at enrollment time. Fabric then classifies the identity as an admin based on the OU value in the certificate's `signcert`.
+  </Accordion>
+  <Accordion title="CA certificates">
+    Self-signed root CA certificates, or intermediate CA certificates signed by a root CA. Stored in `cacerts` and `intermediatecerts` folders within an MSP. These define the trust domain for an organization.
+  </Accordion>
+</AccordionGroup>
+
+## What is an MSP?
+
+A **Membership Service Provider (MSP)** is the component that turns verifiable PKI identities into organizational roles. While a CA issues certificates (like a credit card provider issuing cards), an MSP defines which certificates are accepted and what they are allowed to do (like the store's list of accepted card networks).
+
+The MSP is not a service that runs — it is a set of configuration artifacts (folders and files) that are loaded by nodes and channels to verify identities and enforce policies.
+
+### MSP responsibilities
+
+- Define which Root CAs and Intermediate CAs are trusted for an organization
+- List which identities are administrators
+- Define Organizational Units (OUs) and Node OU roles
+- Maintain Certificate Revocation Lists (CRLs)
+- Enable TLS certificate validation (separate from enrollment CA trust)
+
+## Local MSP vs. channel MSP
+
+MSPs exist at two scopes in Fabric:
+
+| Scope | Where defined | Purpose |
+|-------|---------------|---------|
+| **Local MSP** | File system of each node or client | Controls who can operate that specific node; provides the node's signing key and certificate |
+| **Channel MSP** | Channel configuration block | Defines which organizations are members of the channel and how their identities are validated |
+
+Every peer and orderer must have a local MSP. Every organization participating in a channel must have its MSP definition included in the channel configuration. The channel MSP is kept in sync across all channel members through consensus.
+
+<Note>
+A channel MSP does not include a `keystore` folder because channel MSPs are used only for identity validation, not for signing. Signing requires a local MSP with a private key.
+</Note>
+
+## MSP folder structure
+
+A local MSP on disk has the following structure:
+
+```
+msp/
+├── config.yaml              # Node OU configuration
+├── cacerts/                 # Root CA certificates
+│   └── ca.org1.example.com-cert.pem
+├── intermediatecerts/       # Intermediate CA certificates (optional)
+├── admincerts/              # Deprecated since v1.4.3; use Node OUs instead
+├── keystore/                # Node's private key (local MSP only)
+│   └── priv_sk
+├── signcerts/               # Node's enrollment certificate
+│   └── peer.org1.example.com-cert.pem
+├── tlscacerts/              # Root TLS CA certificates
+│   └── tls-ca.org1.example.com-cert.pem
+├── tlsintermediatecacerts/  # Intermediate TLS CA certificates (optional)
+└── operationscerts/         # Certificates for the operations service API
+```
+
+A channel MSP includes an additional folder for revoked identities:
+
+```
+channel-msp/
+├── cacerts/
+├── intermediatecerts/
+├── admincerts/          # Deprecated
+├── tlscacerts/
+└── crls/                # Certificate Revocation Lists (channel MSP only)
+```
+
+<Warning>
+The `keystore` folder contains the node's private signing key. Access to this folder must be strictly limited to the node itself. If you use a Hardware Security Module (HSM) for key management, this folder will be empty because the private key is stored in the HSM.
+</Warning>
+
+## Organizational units (OUs)
+
+An **Organizational Unit (OU)** subdivides an organization into groups, typically representing departments or lines of business. The `OU` field in an X.509 certificate specifies which division an identity belongs to.
+
+OUs can be used in policy expressions to restrict access at a finer granularity than the whole organization. For example, an endorsement policy might require signatures from `Org1.MANUFACTURING` peers rather than any `Org1` member.
+
+Configure OUs in `config.yaml`:
+
+```yaml
+OrganizationalUnitIdentifiers:
+  - Certificate: "cacerts/cacert1.pem"
+    OrganizationalUnitIdentifier: "commercial"
+  - Certificate: "cacerts/cacert2.pem"
+    OrganizationalUnitIdentifier: "administrators"
+```
+
+An MSP identity is valid if it carries at least one of the configured OU identifiers.
+
+## Node OU roles
+
+Node OUs are a special kind of OU that assign a **role** to an identity at enrollment time. They enable Fabric to distinguish between different actor types without needing separate MSPs or `admincerts` folders.
+
+The four Node OU roles are:
+
+| Role | Description |
+|------|-------------|
+| `client` | An identity that transacts on the network (application clients, SDKs) |
+| `peer` | An identity that endorses or commits transactions |
+| `admin` | An identity that performs administrative tasks (channel joins, config updates) |
+| `orderer` | An identity belonging to an ordering node |
+
+Enable Node OUs in `config.yaml`:
+
+```yaml
+NodeOUs:
+  Enable: true
+  ClientOUIdentifier:
+    # Certificate: "cacerts/cacert.pem"   # Optional: restrict to a specific CA
+    OrganizationalUnitIdentifier: "client"
+  AdminOUIdentifier:
+    OrganizationalUnitIdentifier: "admin"
+  PeerOUIdentifier:
+    OrganizationalUnitIdentifier: "peer"
+  OrdererOUIdentifier:
+    OrganizationalUnitIdentifier: "orderer"
+```
+
+When `NodeOUs.Enable` is `true`, the Fabric CA or SDK assigns the appropriate OU value to the `CommonName` attribute of the certificate at enrollment time. The `admin` role means you no longer need to explicitly place certificates in the `admincerts` folder.
+
+<Tip>
+Omitting the `Certificate` field in each OU identifier (as shown above) is recommended for production. This allows you to add new CA or intermediate certificates later without reissuing all existing credentials.
+</Tip>
+
+## Intermediate CAs
+
+An **Intermediate CA** is a CA whose certificate is signed by a root CA or another intermediate CA, forming a chain of trust. Using intermediate CAs provides several benefits:
+
+- **Operational isolation**: The root CA can be kept offline (air-gapped) while day-to-day certificate issuance is handled by an intermediate CA.
+- **Organizational division**: Different subdivisions of an organization (e.g., `ORG1.MANUFACTURING` and `ORG1.DISTRIBUTION`) can have separate intermediate CAs, enabling finer-grained trust boundaries.
+- **Reduced blast radius**: If an intermediate CA is compromised, only certificates issued by that CA are affected, not the entire PKI hierarchy.
+
+To configure an intermediate CA in an MSP, place its certificate in the `intermediatecerts` folder. Each intermediate CA certificate must chain back to a root CA listed in `cacerts`.
+
+```
+Root CA  (offline, highly protected)
+  └── Intermediate CA  (online, used for daily issuance)
+        ├── peer0.org1.example.com-cert.pem
+        ├── peer1.org1.example.com-cert.pem
+        └── admin@org1.example.com-cert.pem
+```
+
+### Fabric CA
+
+Hyperledger Fabric ships with **Fabric CA**, a built-in root CA component for managing X.509 identities in Fabric networks. Fabric CA supports:
+
+- Registering and enrolling identities
+- Issuing enrollment and TLS certificates
+- Generating CRLs
+- Intermediate CA configuration
+
+For production deployments, you can also use a commercial or public CA in place of or alongside Fabric CA.
+
+<Note>
+Fabric CA is not a general-purpose SSL certificate provider. It is purpose-built for Fabric network identity management and is not suitable for browser TLS certificates.
+</Note>
+
+## Identity Mixer (Idemix) — anonymous credentials
+
+Fabric includes support for **Identity Mixer (Idemix)**, a cryptographic protocol that enables users to prove membership in an organization without revealing their actual identity. This provides **unlinkability**: different transactions by the same user cannot be correlated.
+
+Idemix works alongside the standard X.509 MSP:
+
+- An Idemix CA issues **credential secrets** rather than X.509 certificates.
+- Users present **zero-knowledge proofs** that they hold a valid credential from a trusted CA, without revealing the credential itself.
+- Transactions signed with Idemix credentials are indistinguishable from one another to external observers.
+
+Idemix is primarily useful for client applications that require strong privacy guarantees, such as regulated industries where transaction linkability would violate privacy requirements.
+
+## Policies and MSP identities
+
+Policies in Fabric define the rules for who can perform specific actions. They reference MSP identities through **signature policies** using the `Signature` policy syntax:
+
+```
+OR('Org1MSP.member', 'Org2MSP.admin')
+AND('Org1MSP.peer', OR('Org2MSP.peer', 'Org3MSP.peer'))
+```
+
+The available role selectors for each MSP are:
+
+| Selector | Matches |
+|----------|---------|
+| `<MSPID>.member` | Any valid identity in the MSP |
+| `<MSPID>.admin` | Identities with the `admin` Node OU (or in `admincerts`) |
+| `<MSPID>.peer` | Identities with the `peer` Node OU |
+| `<MSPID>.client` | Identities with the `client` Node OU |
+| `<MSPID>.orderer` | Identities with the `orderer` Node OU |
+
+Policies are evaluated by checking the signatures on a transaction or proposal against the MSP definitions in the channel configuration. For an identity to be valid, it must:
+
+1. Present an X.509 certificate with a verifiable chain to a root CA listed in the MSP's `cacerts`
+2. Not appear in any CRL in the MSP's `crls` folder
+3. Carry at least one of the MSP's configured OU identifiers (if OUs are configured)
+
+For more detail on policy types (ImplicitMeta vs. Signature) and how they compose, see the Fabric documentation on policies.
+
+## MSP best practices
+
+<AccordionGroup>
+  <Accordion title="One MSP per organization">
+    Maintain a one-to-one mapping between organizations and MSPs. If an organization has multiple divisions, use OUs rather than multiple MSPs to avoid complicating gossip and policy management.
+  </Accordion>
+  <Accordion title="Separate admin and CA certificates">
+    MSP admin certificates should be different from the root CA certificates. This separates the administrative role from the certificate issuance role and follows the principle of least privilege.
+  </Accordion>
+  <Accordion title="Separate identity CAs from TLS CAs">
+    Use different CAs for enrollment certificates and TLS certificates. Place them in `cacerts` and `tlscacerts` respectively. Reusing the same CA for both is technically possible but not recommended in production.
+  </Accordion>
+  <Accordion title="Prefer Node OUs over admincerts">
+    Use the Node OU feature (enabled in `config.yaml`) rather than the deprecated `admincerts` folder. Node OUs are more flexible and allow admin identities to be added or revoked without channel reconfiguration.
+  </Accordion>
+</AccordionGroup>

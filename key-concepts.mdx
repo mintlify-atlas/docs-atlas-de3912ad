@@ -1,0 +1,268 @@
+---
+title: "Key concepts"
+description: "The essential building blocks of Hyperledger Fabric: distributed ledgers, peers, orderers, channels, chaincode, and the transaction flow."
+---
+
+Hyperledger Fabric is built around a set of interlocking concepts. Understanding each one — and how they relate — gives you a clear mental model before diving into hands-on work.
+
+<CardGroup cols={3}>
+  <Card title="Fabric model" icon="cubes" href="/fabric-model">
+    Assets, chaincode, ledger features, privacy, and consensus in depth
+  </Card>
+  <Card title="Smart contracts" icon="file-code" href="/chaincode/overview">
+    Write and deploy chaincode in Go, Java, or Node.js
+  </Card>
+  <Card title="Network operations" icon="network-wired" href="/operations/channels">
+    Channels, identity, private data, and the gateway service
+  </Card>
+</CardGroup>
+
+## What is a blockchain?
+
+A blockchain is a distributed ledger — a shared, replicated record of transactions maintained across a network of nodes. Unlike a traditional database owned by a single organization, every participant holds a copy and collaborates to keep it consistent.
+
+Three properties make a blockchain ledger distinctive:
+
+- **Decentralized** — No single entity controls the data. Every authorized participant maintains a replica.
+- **Immutable** — Transactions are append-only. Cryptographic hashing binds each block to the one before it, making retrospective modification detectable.
+- **Shared programs on shared data** — All participants use the same smart contract logic to update the same ledger, eliminating reconciliation between siloed systems.
+
+<Info>
+Hyperledger Fabric is a **permissioned** blockchain. Participants are authenticated using X.509 certificates before they can read or write. This is distinct from public, permissionless networks like Bitcoin or Ethereum, where anyone can join anonymously.
+</Info>
+
+### The distributed ledger in Fabric
+
+Fabric's ledger has two distinct components that work together:
+
+| Component | Description |
+|-----------|-------------|
+| **World state** | A database of current key-value pairs representing the present state of all assets |
+| **Transaction log (blockchain)** | An immutable, append-only sequence of blocks recording every change that produced the world state |
+
+The world state can be queried directly and efficiently. The transaction log provides full audit history. Together they answer both "what is the current value?" and "how did we get here?".
+
+## Peers
+
+Peers are the fundamental nodes of a Fabric network. Every peer:
+
+- **Hosts ledger instances** — one per channel the peer belongs to
+- **Hosts chaincode instances** — the smart contracts that read and write the ledger
+- **Validates and commits transactions** — after transactions are ordered, peers apply them to their local ledger copy
+
+A single peer can participate in multiple channels and therefore maintain multiple independent ledger replicas simultaneously.
+
+### Peer roles
+
+Peers take on specific roles depending on how they are configured and what tasks they perform:
+
+<AccordionGroup>
+  <Accordion title="Endorsing peer">
+    An endorsing peer simulates a transaction proposal — it executes chaincode against its current ledger state and returns a signed read-write set to the client. It does **not** commit the transaction at this stage. Which peers must endorse a given transaction is determined by the chaincode's endorsement policy.
+  </Accordion>
+  <Accordion title="Committing peer">
+    Every peer on a channel is a committing peer. After the ordering service delivers a block, each peer validates every transaction in the block against the endorsement policy, checks for read-set conflicts, and appends the block to its local ledger.
+  </Accordion>
+  <Accordion title="Anchor peer">
+    An anchor peer is designated in the channel configuration for each organization. It is the contact point that other organizations use to discover the rest of that organization's peers via the gossip protocol. Every organization on a channel should have at least one anchor peer.
+  </Accordion>
+  <Accordion title="Leading peer">
+    The leading peer (elected or static) receives newly ordered blocks from the ordering service on behalf of its organization and distributes them to the other peers in that organization via gossip.
+  </Accordion>
+</AccordionGroup>
+
+## The ordering service
+
+The ordering service is the component responsible for **establishing a deterministic, consistent order of transactions** across the network.
+
+Peers submit endorsed transactions to the ordering service. The ordering service:
+
+1. Collects endorsed transactions from peers across the channel
+2. Batches them into blocks according to configurable size and timeout parameters
+3. Delivers the ordered blocks to all peers on the channel
+
+<Note>
+The ordering service does not inspect transaction content for validity — it only orders. Endorsement policy validation and ledger commit happen at the peers in phase three.
+</Note>
+
+Separating ordering from execution gives Fabric significant performance advantages: endorsement runs in parallel across peers, while ordering operates independently and can scale independently too.
+
+### Ordering service implementations
+
+Fabric supports pluggable consensus for the ordering service:
+
+| Implementation | Fault tolerance | Recommended use |
+|----------------|----------------|-----------------|
+| **Raft** | Crash fault tolerant (CFT) | Production networks — default recommendation |
+| **SmartBFT** | Byzantine fault tolerant (BFT) | Multi-org networks requiring stronger guarantees |
+
+Because Fabric uses **deterministic** consensus, every block validated by a peer is guaranteed to be final. There are no forks.
+
+## Channels
+
+A channel is a private communication subnet within a Fabric network. Each channel has:
+
+- Its own **ledger** — independent from all other channels
+- Its own set of **member organizations**
+- Its own **chaincode** deployments
+- Its own **policies** and access control rules
+
+Only peers that are members of a channel can see its transactions, chaincode, and ledger data. A peer can participate in multiple channels simultaneously, maintaining a separate ledger for each.
+
+```
+Network
+├── Channel A  (Org1, Org2)      ← Ledger A, Chaincode A
+└── Channel B  (Org1, Org3)      ← Ledger B, Chaincode B
+```
+
+<Tip>
+Use channels when two or more organizations need to transact in a way that is completely invisible to other network participants. For finer-grained privacy within a channel, use **private data collections** instead of creating a new channel.
+</Tip>
+
+Channels are created by submitting a configuration transaction that specifies member organizations, anchor peers, and policies. A genesis block is generated for the channel ledger at creation time.
+
+## Chaincode (smart contracts)
+
+Chaincode is the business logic layer of Fabric. It defines assets and the operations that can be performed on them. When chaincode executes, it reads from and writes to the ledger's world state.
+
+In Fabric, the terms **smart contract** and **chaincode** are often used interchangeably, but they have a precise distinction:
+
+- A **smart contract** defines the transaction logic for a specific business domain (e.g., a `transfer` function for a car asset).
+- A **chaincode** is the deployment unit — it packages one or more smart contracts and is installed on peers and committed to a channel.
+
+Chaincode can be written in **Go**, **Java**, or **Node.js** — standard general-purpose languages, not a constrained DSL.
+
+<Info>
+Chaincode runs inside an isolated container environment (Docker by default). It cannot directly access the ledger state — all reads and writes go through the Fabric chaincode API, which enforces access control and produces the read-write set used during transaction validation.
+</Info>
+
+### What chaincode can do
+
+- Create, update, and delete key-value pairs in the world state
+- Query the current state by key, range, or composite key
+- Query the full history of a key (if using CouchDB, rich JSON queries are also available)
+- Invoke other chaincode on the same channel
+
+## The ledger
+
+The ledger is the authoritative record of all asset state in a Fabric network. Each channel has exactly one ledger, and every peer on that channel maintains a full replica.
+
+### World state
+
+The world state is a key-value database representing the **current** value of all assets. It is optimized for direct reads — you do not need to replay the entire transaction log to find the current value of a key.
+
+Fabric supports two world state databases:
+
+| Database | Query capability |
+|----------|-----------------|
+| **LevelDB** (default) | Key-based lookups and range queries |
+| **CouchDB** | All of LevelDB plus rich JSON queries using a query language |
+
+### Blockchain (transaction log)
+
+The blockchain component of the ledger is an append-only sequence of blocks. Each block:
+
+- Contains one or more transactions
+- Includes a cryptographic hash of the previous block (chaining)
+- Is immutable once written — it cannot be deleted or altered
+
+This structure allows full audit history and data provenance: you can always trace how the current world state was reached.
+
+## Membership Service Provider (MSP) and identity
+
+Every entity in a Fabric network — peers, orderers, client applications, and admins — has an identity represented by an **X.509 certificate** issued by a Certificate Authority (CA).
+
+The **Membership Service Provider (MSP)** is the component that:
+
+- Maps certificates to organizational identities and roles
+- Defines which certificates are trusted within the network and on each channel
+- Enforces access control by validating signatures on transactions and configuration updates
+
+There is typically one MSP per organization. The MSP definition is distributed to all peers and orderers so they can verify signatures from any participant.
+
+```
+Certificate Authority (CA)
+└── Issues X.509 certs to:
+    ├── Peers          → "I am Org1's peer"
+    ├── Orderers       → "I am the orderer for Org1"
+    ├── Admins         → "I am Org1's admin"
+    └── Client apps    → "I am an Org1 application"
+```
+
+<Note>
+Fabric also supports the Fabric CA server, which provides a full PKI implementation including certificate enrollment, renewal, and revocation. You can also use any standard X.509 CA in its place.
+</Note>
+
+## Policies and endorsement policies
+
+Policies govern what actions are permitted in a Fabric network and who is authorized to perform them. They appear throughout the system:
+
+- **Channel policies** — control who can read, write to, and configure a channel
+- **Chaincode endorsement policies** — specify which organizations' peers must endorse a transaction before it is considered valid
+- **Lifecycle policies** — control who can install, approve, and commit chaincode definitions
+
+### Endorsement policies
+
+An endorsement policy is attached to each chaincode definition and evaluated during transaction validation. It expresses rules such as:
+
+- `AND('Org1.member', 'Org2.member')` — both organizations must endorse
+- `OR('Org1.member', 'Org2.member')` — either organization may endorse
+- `OutOf(2, 'Org1.member', 'Org2.member', 'Org3.member')` — any two of three organizations must endorse
+
+Transactions that do not satisfy the endorsement policy are marked invalid during the validation phase and are not committed to the ledger (though the block containing them is still appended, with those transactions flagged).
+
+## The transaction flow
+
+Fabric uses an **execute-order-validate** architecture. This separates the three phases of a transaction lifecycle, which is fundamentally different from the order-execute model used by most other blockchain platforms.
+
+<Steps>
+  <Step title="Propose (execute)">
+    A client application sends a **transaction proposal** to the Fabric Gateway service on a trusted peer. The gateway forwards the proposal to the endorsing peers required by the chaincode's endorsement policy.
+
+    Each endorsing peer:
+    - Verifies the client's signature and channel membership
+    - Executes the chaincode against its current world state
+    - Returns a signed **proposal response** containing a read set (keys read) and write set (keys to be written), but does **not** update its ledger
+
+    Because execution happens in parallel across peers at this stage, Fabric can scale horizontally and eliminate non-determinism before ordering.
+  </Step>
+  <Step title="Order">
+    The gateway collects sufficient endorsements and submits the endorsed transaction to the **ordering service**.
+
+    The ordering service:
+    - Accepts endorsed transactions from across the channel
+    - Batches them into a block in a deterministic order
+    - Delivers the block to all peers on the channel via the gossip protocol
+
+    The ordering service does not evaluate endorsement policies — it only produces a canonical order.
+  </Step>
+  <Step title="Validate and commit">
+    Every peer on the channel independently validates each transaction in the delivered block:
+
+    1. **Endorsement policy check** — are enough valid signatures present from the required organizations?
+    2. **Read-write version check** — have any of the keys in the read set changed since the transaction was simulated? (prevents double-spend)
+
+    Valid transactions are committed to the world state. Invalid transactions are flagged and skipped, but the block is still appended to the transaction log. The peer emits an event to notify the client of the outcome.
+  </Step>
+</Steps>
+
+<Info>
+The execute-order-validate model means chaincode only runs on the subset of peers required by the endorsement policy — not on every node in the network. This is a key reason Fabric can support standard programming languages (Go, Java, Node.js) without requiring deterministic DSLs.
+</Info>
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Fabric model" icon="cubes" href="/fabric-model">
+    Deep dive into assets, ledger features, privacy channels, and the security model
+  </Card>
+  <Card title="Channels" icon="sitemap" href="/operations/channels">
+    How to create and manage channels in a running network
+  </Card>
+  <Card title="Identity and MSP" icon="id-card" href="/operations/identity-and-msp">
+    PKI, Certificate Authorities, and MSP configuration
+  </Card>
+  <Card title="Consensus" icon="arrows-rotate" href="/operations/consensus">
+    Raft and SmartBFT ordering service configuration and operations
+  </Card>
+</CardGroup>

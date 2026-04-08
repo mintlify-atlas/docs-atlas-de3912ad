@@ -1,0 +1,310 @@
+---
+title: "peer chaincode"
+description: "Reference for the peer chaincode subcommands used to invoke and query chaincode on a Hyperledger Fabric peer."
+---
+
+The `peer chaincode` command lets users invoke transactions and query chaincode on the ledger.
+
+<Warning>
+  The `peer chaincode install`, `peer chaincode instantiate`, and `peer chaincode upgrade` commands from the Fabric v1.x lifecycle are no longer available in current versions of the `peer` binary. For all new deployments, use the [`peer lifecycle chaincode`](/commands/peer-lifecycle) commands instead.
+</Warning>
+
+## Syntax
+
+```bash
+peer chaincode <subcommand> [flags]
+```
+
+Available subcommands:
+
+| Subcommand | Description |
+|---|---|
+| `invoke` | Submit a transaction that invokes chaincode |
+| `query` | Query chaincode and return the result without generating a transaction |
+
+## Constructor argument format
+
+Both `invoke` and `query` accept a constructor argument (`-c` / `--ctor`) that is a JSON string specifying the chaincode function to call and its arguments.
+
+The JSON string must contain either:
+- An `Args` key only — the first element is the function name, remaining elements are arguments:
+  ```json
+  {"Args": ["Transfer", "asset1", "org2", "100"]}
+  ```
+- Both `Function` and `Args` keys:
+  ```json
+  {"Function": "Transfer", "Args": ["asset1", "org2", "100"]}
+  ```
+
+These two forms are equivalent. Key names are case-insensitive.
+
+For chaincodes that use the `contract-api` and expose multiple contracts, prefix the function name with the contract name:
+
+```bash
+peer chaincode invoke -C $CHANNEL_NAME -n $CHAINCODE_NAME \
+  -c '{"Args": ["MyContract:methodName", "{}"]}'
+```
+
+## Global flags
+
+All `peer chaincode` subcommands share these flags:
+
+<ParamField path="--cafile" type="string">
+  Path to a file containing PEM-encoded trusted certificate(s) for the ordering endpoint.
+</ParamField>
+
+<ParamField path="--certfile" type="string">
+  Path to a file containing the PEM-encoded X509 public key for mutual TLS with the orderer.
+</ParamField>
+
+<ParamField path="--clientauth" type="boolean">
+  Use mutual TLS when communicating with the orderer endpoint.
+</ParamField>
+
+<ParamField path="--connTimeout" type="duration" default="3s">
+  Timeout for client to connect.
+</ParamField>
+
+<ParamField path="--keyfile" type="string">
+  Path to a file containing the PEM-encoded private key for mutual TLS with the orderer.
+</ParamField>
+
+<ParamField path="-o, --orderer" type="string">
+  Ordering service endpoint (`<hostname>:<port>`).
+</ParamField>
+
+<ParamField path="--ordererTLSHostnameOverride" type="string">
+  Hostname override for TLS validation when connecting to the orderer.
+</ParamField>
+
+<ParamField path="--tls" type="boolean">
+  Use TLS when communicating with the orderer endpoint.
+</ParamField>
+
+<ParamField path="--tlsHandshakeTimeShift" type="duration">
+  Shift the time backwards for certificate expiration checks during TLS handshakes with the orderer.
+</ParamField>
+
+<ParamField path="--transient" type="string">
+  Transient map of arguments in JSON encoding. Transient data is not written to the ledger and is used for private data scenarios.
+</ParamField>
+
+<Note>
+  Flags of type `stringArray` (such as `--peerAddresses` and `--tlsRootCertFiles`) must be repeated for each value rather than providing a space-separated string. For example: `--peerAddresses localhost:9051 --peerAddresses localhost:7051`.
+</Note>
+
+---
+
+## peer chaincode invoke
+
+Submits a transaction that invokes a chaincode function. The transaction is endorsed by the specified peers, ordered, and committed to the ledger. Use this for operations that read or write ledger state.
+
+**Syntax**
+
+```bash
+peer chaincode invoke [flags]
+```
+
+**Flags**
+
+<ParamField path="-C, --channelID" type="string" required>
+  The channel on which to invoke the chaincode.
+</ParamField>
+
+<ParamField path="-n, --name" type="string" required>
+  Name of the chaincode to invoke.
+</ParamField>
+
+<ParamField path="-c, --ctor" type="string" default="{}">
+  Constructor message specifying the function and arguments, in JSON format.
+</ParamField>
+
+<ParamField path="--peerAddresses" type="string[]">
+  Addresses of the peers to send the endorsement proposal to. Repeat for multiple peers. Include peers from each organization required by the endorsement policy.
+</ParamField>
+
+<ParamField path="--tlsRootCertFiles" type="string[]">
+  Paths to TLS root cert files for each peer in `--peerAddresses`. Order and count must match.
+</ParamField>
+
+<ParamField path="--connectionProfile" type="string">
+  Path to a connection profile that provides peer connection information.
+</ParamField>
+
+<ParamField path="-I, --isInit" type="boolean">
+  Indicates that this invocation calls the chaincode `Init` function. Used to support legacy chaincodes in the new lifecycle when `--init-required` was set during `approveformyorg`.
+</ParamField>
+
+<ParamField path="--waitForEvent" type="boolean">
+  Wait for the commit event from each peer's deliver service confirming the transaction has been committed.
+</ParamField>
+
+<ParamField path="--waitForEventTimeout" type="duration" default="30s">
+  How long to wait for the commit event.
+</ParamField>
+
+**Examples**
+
+Invoke a transfer function on chaincode `mycc` on channel `mychannel`, targeting peers from two organizations:
+
+```bash
+peer chaincode invoke \
+  -o orderer.example.com:7050 \
+  -C mychannel \
+  -n mycc \
+  --peerAddresses peer0.org1.example.com:7051 \
+  --peerAddresses peer0.org2.example.com:9051 \
+  -c '{"Args":["invoke","a","b","10"]}'
+```
+
+On success, you will see a log line similar to:
+
+```text
+2018-02-22 16:34:27.107 UTC [chaincodeCmd] chaincodeInvokeOrQuery -> INFO 00b Chaincode invoke successful. result: status:200
+```
+
+Invoke a specific contract method in a multi-contract chaincode package:
+
+```bash
+peer chaincode invoke \
+  -C $CHANNEL_NAME \
+  -n $CHAINCODE_NAME \
+  -c '{"Args": ["MyContract:methodName", "{}"]}'
+```
+
+<Note>
+  A successful `invoke` response means the transaction was submitted to the orderer successfully. It does not guarantee the transaction has been committed and validated by all peers on the channel. Use `--waitForEvent` to block until commit confirmation is received.
+</Note>
+
+---
+
+## peer chaincode query
+
+Calls a chaincode function and returns the result without creating a transaction or modifying ledger state. Suitable for read-only operations.
+
+**Syntax**
+
+```bash
+peer chaincode query [flags]
+```
+
+**Flags**
+
+<ParamField path="-C, --channelID" type="string" required>
+  The channel on which to query the chaincode.
+</ParamField>
+
+<ParamField path="-n, --name" type="string" required>
+  Name of the chaincode to query.
+</ParamField>
+
+<ParamField path="-c, --ctor" type="string" default="{}">
+  Constructor message specifying the query function and arguments, in JSON format.
+</ParamField>
+
+<ParamField path="--peerAddresses" type="string[]">
+  Addresses of the peers to query. For read operations, a single peer is sufficient.
+</ParamField>
+
+<ParamField path="--tlsRootCertFiles" type="string[]">
+  Paths to TLS root cert files for each peer in `--peerAddresses`.
+</ParamField>
+
+<ParamField path="--connectionProfile" type="string">
+  Path to a connection profile that provides peer connection information.
+</ParamField>
+
+<ParamField path="-x, --hex" type="boolean">
+  Output the query result as a hexadecimal byte array. Incompatible with `--raw`.
+</ParamField>
+
+<ParamField path="-r, --raw" type="boolean">
+  Output the query result as raw bytes rather than a printable string.
+</ParamField>
+
+**Example**
+
+Query the value of variable `a` on chaincode `mycc` in channel `mychannel`:
+
+```bash
+peer chaincode query \
+  -C mychannel \
+  -n mycc \
+  -c '{"Args":["query","a"]}'
+```
+
+```text
+Query Result: 90
+```
+
+Query all assets using a function that takes no arguments:
+
+```bash
+peer chaincode query \
+  -C mychannel \
+  -n basic \
+  -c '{"Args":["GetAllAssets"]}'
+```
+
+---
+
+## Legacy subcommands
+
+The following subcommands were part of the Fabric v1.x lifecycle and are no longer present in current peer binaries. They are documented here for reference only.
+
+<Warning>
+  Do not use these commands for new deployments. Use [`peer lifecycle chaincode`](/commands/peer-lifecycle) to install, approve, and commit chaincode.
+</Warning>
+
+### peer chaincode install (legacy)
+
+Packaged and installed chaincode on a peer using the old lifecycle. Required running on each peer that would endorse transactions.
+
+```bash
+# Legacy — not available in current peer binary
+peer chaincode install -n mycc -v 1.0 -p github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02
+```
+
+### peer chaincode instantiate (legacy)
+
+Deployed and initialized chaincode on a channel after installation. Required admin privileges.
+
+```bash
+# Legacy — not available in current peer binary
+peer chaincode instantiate \
+  -o orderer.example.com:7050 \
+  -C mychannel \
+  -n mycc \
+  -v 1.0 \
+  -c '{"Args":["init","a","100","b","200"]}' \
+  -P "AND ('Org1MSP.peer','Org2MSP.peer')"
+```
+
+### peer chaincode upgrade (legacy)
+
+Updated an already-instantiated chaincode to a new version on a channel.
+
+```bash
+# Legacy — not available in current peer binary
+peer chaincode upgrade \
+  -o orderer.example.com:7050 \
+  -C mychannel \
+  -n mycc \
+  -v 2.0 \
+  -c '{"Args":["init","a","100","b","200"]}' \
+  -P "AND ('Org1MSP.peer','Org2MSP.peer')"
+```
+
+### peer chaincode list (legacy)
+
+Listed instantiated chaincodes on a channel or installed chaincodes on a peer.
+
+```bash
+# Legacy — not available in current peer binary
+peer chaincode list --instantiated -C mychannel
+peer chaincode list --installed
+```
+
+<Tip>
+  Use [`peer lifecycle chaincode queryinstalled`](/commands/peer-lifecycle#peer-lifecycle-chaincode-queryinstalled) and [`peer lifecycle chaincode querycommitted`](/commands/peer-lifecycle#peer-lifecycle-chaincode-querycommitted) as the current equivalents.
+</Tip>

@@ -1,0 +1,239 @@
+---
+title: "Consensus"
+description: "Understand consensus in Hyperledger Fabric: the ordering service role, Raft CFT configuration and operations, SmartBFT Byzantine fault tolerance, and how to choose between the two."
+---
+
+## What consensus means in Fabric
+
+In many public blockchains, "consensus" refers specifically to the mechanism by which nodes agree on the order of transactions. In Hyperledger Fabric, consensus is broader: it spans the **entire transaction lifecycle** from proposal through endorsement, ordering, and final validation at the peer.
+
+The three phases of Fabric consensus are:
+
+1. **Endorsement** — Client applications collect sufficient endorsements from peers according to the chaincode's endorsement policy.
+2. **Ordering** — The ordering service receives endorsed transactions, sequences them into blocks, and distributes those blocks to peers.
+3. **Validation and commitment** — Each peer independently validates the transactions in the block (checking endorsements, MVCC conflicts, and policies) before committing valid transactions to the ledger.
+
+This separation of endorsement from ordering is a deliberate design choice. Peers execute chaincode and check business logic; orderers sequence transactions without examining their content. This gives Fabric significant performance and scalability advantages over systems where the same nodes execute, order, and validate.
+
+## The ordering service's role
+
+The ordering service is responsible for:
+
+- **Sequencing transactions** — Establishing a deterministic, canonical order for all transactions across the channel.
+- **Forming blocks** — Grouping ordered transactions into blocks according to `BatchSize` and `BatchTimeout` configuration parameters.
+- **Distributing blocks** — Delivering finalized blocks to leader peers on each channel.
+- **Enforcing channel access control** — Processing configuration update transactions and validating that the requester holds the required administrative rights.
+
+<Note>
+Orderers do not execute chaincode, examine transaction business logic, or maintain the world state. With the exception of channel configuration transactions, orderers treat all transactions as opaque data to be sequenced and batched.
+</Note>
+
+Blocks produced by the ordering service are **final**. Once a transaction is written to a block, its position in the ledger is immutably assured. There are no ledger forks in Fabric.
+
+## Raft consensus (CFT)
+
+Raft is the recommended ordering service for production Fabric networks. It is a **Crash Fault Tolerant (CFT)** implementation based on the [etcd/raft](https://coreos.com/etcd/) library.
+
+### Leader election and log replication
+
+Raft uses a "leader and follower" model:
+
+- A **leader** is dynamically elected per channel from among the ordering nodes in the consenter set.
+- The leader ingests new transactions, packages them into log entries, and replicates those entries to follower nodes.
+- **Followers** replicate the log deterministically and send heartbeat acknowledgements to the leader.
+- If followers stop receiving heartbeats within the election timeout, they self-promote to **candidate** and initiate a new leader election.
+
+A Raft ordering service can tolerate the loss of nodes as long as a **quorum** (majority) remains. For `n` nodes, `⌊n/2⌋` failures can be tolerated:
+
+| Cluster size | Nodes that can fail | Quorum required |
+|:---:|:---:|:---:|
+| 1 | 0 | 1 |
+| 3 | 1 | 2 |
+| 5 | 2 | 3 |
+| 7 | 3 | 4 |
+
+Each channel runs its own instance of the Raft protocol, allowing different channels to elect different leaders and enabling further decentralization when ordering nodes are owned by multiple organizations.
+
+### Raft channel configuration parameters
+
+<Warning>
+Misconfiguring `TickInterval` and `ElectionTick` to extremely low values can produce a state where a leader can never be elected. This situation is unrecoverable. Change these values only during a scheduled maintenance window and only when all consenters are online and healthy.
+</Warning>
+
+| Parameter | Description |
+|-----------|-------------|
+| `TickInterval` | The time interval between two `Node.Tick` invocations. All other tick-based parameters are multiples of this value. |
+| `ElectionTick` | Number of ticks a follower waits without hearing from the leader before initiating an election. Must be greater than `HeartbeatTick`. |
+| `HeartbeatTick` | Number of ticks between heartbeat messages sent by the leader to maintain leadership. |
+| `MaxInflightBlocks` | Maximum number of in-flight blocks during optimistic replication. Limits pipeline depth. |
+| `SnapshotIntervalSize` | Number of bytes of log data after which a snapshot is taken. **Can be changed at runtime without restarting nodes.** |
+
+The following local `orderer.yaml` parameters control write-ahead log and snapshot storage:
+
+```yaml
+Consensus:
+  WALDir: /var/hyperledger/orderer/wal
+  SnapDir: /var/hyperledger/orderer/etcdraft/snapshot
+```
+
+### Adding and removing Raft nodes
+
+Raft supports dynamic addition and removal of nodes while the channel is operational, with the constraint that **only one node may be added or removed at a time**.
+
+<Steps>
+  <Step title="Ensure the orderer organization is on the channel">
+    The organization owning the new node must already be an orderer organization on the channel. If not, add the organization to the channel configuration first.
+  </Step>
+  <Step title="Start the new ordering node">
+    Deploy the new node with a valid MSP and `orderer.yaml` configuration. Do not point it at a genesis block at startup — the channel participation API handles onboarding.
+  </Step>
+  <Step title="Join the node to the channel">
+    ```bash
+    osnadmin channel join \
+      --channelID mychannel \
+      --config-block ./channel-artifacts/mychannel.block \
+      -o neworderer.example.com:7053 \
+      --ca-file "$ORDERER_CA" \
+      --client-cert "$ADMIN_TLS_CERTFILE" \
+      --client-key "$ADMIN_TLS_KEYFILE"
+    ```
+    The node is initially added as a **follower** — it replicates blocks but is not in the consenter set.
+  </Step>
+  <Step title="Wait for the node to reach active status">
+    Monitor the node until its status changes from `onboarding` to `active`. At this point it has replicated the full ledger.
+  </Step>
+  <Step title="Add the node to the consenter set">
+    Submit a channel configuration update to add the node's TLS certificates and endpoint to the `Orderer.ConsensusType.Metadata.Consenters` list.
+  </Step>
+</Steps>
+
+To **remove** a node, submit a channel config update that removes the node's endpoint and TLS certificates from the consenter set, then use `osnadmin channel remove` to detach the node from the channel.
+
+### Certificate rotation for Raft nodes
+
+Raft nodes identify each other using **TLS pinning** — the TLS certificate of each node is embedded in the channel configuration. When a TLS certificate must be rotated:
+
+1. For each channel the node participates in, submit a config update adding the new TLS certificate.
+2. Replace the certificate on the node's file system.
+3. Restart the node.
+
+<Warning>
+Because a Raft node can only hold a single TLS certificate at a time, it cannot service channels where the old certificate is still configured. Complete the rotation quickly to avoid degraded fault tolerance during the update window.
+</Warning>
+
+### Raft metrics to monitor
+
+| Metric | What it signals |
+|--------|-----------------|
+| `consensus_etcdraft_is_leader` | Which node is the current leader. If no node has this set to 1, quorum is lost. |
+| `consensus_etcdraft_data_persist_duration` | Time for write-ahead log `fsync` operations. Rising values indicate I/O pressure that may prevent participation in consensus. |
+| `consensus_etcdraft_cluster_size` | Total number of nodes in the consenter set. |
+| `consensus_etcdraft_active_nodes` | Number of nodes currently contributing to consensus. If this falls below majority, the ordering service stalls. |
+
+## SmartBFT consensus
+
+SmartBFT is Fabric's **Byzantine Fault Tolerant (BFT)** ordering service, introduced in v3.0. Unlike Raft, SmartBFT can tolerate nodes that behave maliciously — not just nodes that crash.
+
+### Byzantine fault tolerance
+
+SmartBFT is based on the [SmartBFT library](https://github.com/hyperledger-labs/SmartBFT), which implements a non-pipelined variant of PBFT. It can withstand up to (but not including) **one-third** of nodes being faulty or malicious:
+
+| Cluster size | Byzantine faults tolerated | Nodes required for progress |
+|:---:|:---:|:---:|
+| 4 | 1 | 3 |
+| 7 | 2 | 5 |
+| 10 | 3 | 7 |
+
+<Note>
+BFT requires a minimum of 4 nodes to tolerate even a single Byzantine fault. A 3-node BFT cluster provides no Byzantine fault tolerance — it can only tolerate crash failures, similar to Raft.
+</Note>
+
+### Leader rotation
+
+Unlike Raft's dynamic leader election, SmartBFT rotates the leader in a **round-robin** fashion. When the current leader is suspected of being faulty (because followers stop receiving a "sign of life" within `LeaderHeartbeatTimeout`), followers lobby for a view change and the next node in rotation becomes the new leader.
+
+When clients submit transactions to a BFT ordering service, they should send the transaction **to all nodes** rather than to a single node. This ensures the transaction reaches the leader even if the current leader is malicious and trying to censor it. The Fabric Gateway service handles this automatically based on channel configuration.
+
+### SmartBFT channel configuration parameters
+
+```yaml
+# Channel configuration (configtx.yaml) — SmartBFT Options
+Options:
+  RequestBatchMaxCount: 100
+  RequestBatchMaxBytes: 10485760       # 10 MB
+  RequestBatchMaxInterval: "50ms"
+  IncomingMessageBufferSize: 200
+  RequestPoolSize: 400                 # Recommended: >= 2x RequestBatchMaxCount
+  RequestForwardTimeout: "2s"
+  RequestComplainTimeout: "20s"
+  RequestAutoRemoveTimeout: "3m"
+  ViewChangeResendInterval: "5s"
+  ViewChangeTimeout: "20s"
+  LeaderHeartbeatTimeout: "1m"
+  LeaderHeartbeatCount: 10
+  CollectTimeout: "1s"
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `RequestBatchMaxCount` | Maximum number of requests in a single block proposal. |
+| `RequestBatchMaxBytes` | Maximum total size of requests in a batch (also the maximum size of a single request). |
+| `RequestBatchMaxInterval` | How long to accumulate requests before proposing a block, if count and size limits are not reached. |
+| `RequestPoolSize` | Number of pending requests retained by the node. **Cannot be changed dynamically; requires a node restart.** |
+| `LeaderHeartbeatTimeout` | Time before followers suspect the leader of being faulty and initiate a view change. |
+| `LeaderHeartbeatCount` | Number of heartbeats per `LeaderHeartbeatTimeout` interval. Heartbeat interval = `LeaderHeartbeatTimeout / LeaderHeartbeatCount`. |
+
+### BFT node identification
+
+Unlike Raft (which uses TLS pinning), BFT nodes identify each other using their **enrollment certificates**. Each node's MSP ID and enrollment certificate must be listed in the channel's `ConsenterMapping`:
+
+```yaml
+ConsenterMapping:
+  - ID: 1
+    Host: bft0.example.com
+    Port: 7050
+    MSPID: OrdererOrg1
+    Identity: /path/to/enrollment-cert.pem
+    ClientTLSCert: path/to/ClientTLSCert0
+    ServerTLSCert: path/to/ServerTLSCert0
+```
+
+<Note>
+BFT requires the channel capability `V3_0` to be enabled. Check `capabilities_concept` in the Fabric documentation for details on enabling channel capabilities.
+</Note>
+
+### BFT block validation policy
+
+When using `configtxgen` with a BFT channel profile, the tool automatically derives an appropriate block validation policy from the `ConsenterMapping`. This policy requires a quorum of BFT orderer signatures to validate each block. When adding or removing ordering nodes, update this policy accordingly.
+
+## Comparing Raft and SmartBFT
+
+| Feature | Raft (CFT) | SmartBFT (BFT) |
+|---------|-----------|----------------|
+| **Fault model** | Crash faults only | Crash faults + Byzantine (malicious) faults |
+| **Fault tolerance** | Up to `⌊n/2⌋` failures (majority quorum) | Up to `⌊(n-1)/3⌋` failures (2/3 quorum) |
+| **Minimum nodes for 1 fault** | 3 | 4 |
+| **Leader selection** | Dynamic election by followers | Round-robin rotation |
+| **Node identification** | TLS certificate pinning | Enrollment certificate + MSP ID |
+| **Transaction submission** | Send to any single node (routed to leader) | Send to all nodes (gateway handles this) |
+| **Transaction guarantee** | May lose tx if leader crashes during ack | Tx persists in follower memory even if leader crashes |
+| **Channel capability** | Any supported version | Requires `V3_0` |
+| **Recommended when** | Most production networks; trusted orderer operators | Decentralized networks where orderer operators may not be fully trusted |
+
+### When to choose BFT over CFT
+
+Use SmartBFT when:
+
+- Ordering nodes are owned by multiple independent organizations with conflicting interests, and you cannot fully trust all orderer operators.
+- Your threat model includes compromised orderer nodes that may attempt to censor transactions or reorder blocks maliciously.
+- True decentralization is a hard requirement, and up to one-third of orderer operators could be adversarial.
+
+Use Raft when:
+
+- The orderer operators are trusted members of a consortium (e.g., a single enterprise, a regulated consortium with legal agreements).
+- Operational simplicity and lower overhead are priorities.
+- The network needs to start quickly and scale incrementally.
+
+<Tip>
+Raft is the right default for the vast majority of enterprise Fabric deployments. SmartBFT provides stronger guarantees at the cost of requiring more nodes and higher message complexity.
+</Tip>

@@ -1,0 +1,222 @@
+---
+title: "Deploying an Ordering Service"
+description: "Configure and deploy a production Raft ordering service using orderer.yaml and the channel participation API."
+---
+
+The ordering service is responsible for creating the deterministic sequence of transaction blocks that peers validate and commit. In production, you deploy a cluster of ordering nodes (consenters) for fault tolerance. Raft requires a majority (quorum) to make progress — deploy **3 or 5 nodes** for production.
+
+## Key configuration: orderer.yaml
+
+The `orderer.yaml` file controls all aspects of an ordering node. Key sections:
+
+```yaml General.yaml
+General:
+  ListenAddress: 0.0.0.0
+  ListenPort: 7050
+
+  TLS:
+    Enabled: true
+    PrivateKey: tls/server.key
+    Certificate: tls/server.crt
+    RootCAs:
+      - tls/ca.crt
+    ClientAuthRequired: false
+
+  LocalMSPDir: msp
+  LocalMSPID: OrdererMSP
+
+  # Admin endpoint for osnadmin channel commands
+  Admin:
+    ListenAddress: 0.0.0.0:9443
+    TLS:
+      Enabled: true
+      Certificate: tls/server.crt
+      PrivateKey: tls/server.key
+      ClientAuthRequired: true
+      ClientRootCAs:
+        - tls/ca.crt
+
+FileLedger:
+  Location: /var/hyperledger/production/orderer
+
+Consensus:
+  # For Raft
+  WALDir: /var/hyperledger/production/orderer/etcdraft/wal
+  SnapDir: /var/hyperledger/production/orderer/etcdraft/snapshot
+```
+
+## Environment variable overrides
+
+All `orderer.yaml` values can be overridden with environment variables using the pattern `ORDERER_<SECTION>_<KEY>` in uppercase with underscores:
+
+| Environment Variable | orderer.yaml Equivalent |
+|---------------------|------------------------|
+| `ORDERER_GENERAL_LISTENADDRESS` | `General.ListenAddress` |
+| `ORDERER_GENERAL_LISTENPORT` | `General.ListenPort` |
+| `ORDERER_GENERAL_LOCALMSPID` | `General.LocalMSPID` |
+| `ORDERER_GENERAL_LOCALMSPDIR` | `General.LocalMSPDir` |
+| `ORDERER_GENERAL_TLS_ENABLED` | `General.TLS.Enabled` |
+| `ORDERER_GENERAL_TLS_PRIVATEKEY` | `General.TLS.PrivateKey` |
+| `ORDERER_GENERAL_TLS_CERTIFICATE` | `General.TLS.Certificate` |
+| `ORDERER_GENERAL_TLS_ROOTCAS` | `General.TLS.RootCAs` |
+| `ORDERER_FILELEDGER_LOCATION` | `FileLedger.Location` |
+| `ORDERER_CONSENSUS_WALDIR` | `Consensus.WALDir` |
+| `ORDERER_CONSENSUS_SNAPDIR` | `Consensus.SnapDir` |
+
+## Starting an orderer
+
+```bash
+orderer start
+```
+
+Or with Docker:
+
+```bash
+docker run -d \
+  --name orderer.example.com \
+  -e ORDERER_GENERAL_LISTENADDRESS=0.0.0.0 \
+  -e ORDERER_GENERAL_LOCALMSPID=OrdererMSP \
+  -e ORDERER_GENERAL_TLS_ENABLED=true \
+  -v /path/to/msp:/var/hyperledger/orderer/msp \
+  -v /path/to/tls:/var/hyperledger/orderer/tls \
+  -p 7050:7050 \
+  -p 9443:9443 \
+  hyperledger/fabric-orderer:latest
+```
+
+## Bootstrapping a channel (channel participation API)
+
+Since Fabric v2.4, orderers join channels using `osnadmin channel join` — there is no system channel. Each orderer must join each channel separately.
+
+<Steps>
+  <Step title="Generate the genesis block">
+    Use `configtxgen` to create the channel genesis block from `configtx.yaml`:
+
+    ```bash
+    configtxgen \
+      -profile ChannelUsingRaft \
+      -outputBlock ./channel-artifacts/mychannel.block \
+      -channelID mychannel
+    ```
+  </Step>
+  <Step title="Join the first orderer">
+    ```bash
+    osnadmin channel join \
+      -o orderer1.example.com:9443 \
+      --ca-file $ORDERER_CA \
+      --client-cert $ADMIN_TLS_CERT \
+      --client-key $ADMIN_TLS_KEY \
+      --channelID mychannel \
+      --config-block ./channel-artifacts/mychannel.block
+    ```
+
+    Expected response (HTTP 201):
+    ```json
+    {
+      "name": "mychannel",
+      "url": "/participation/v1/channels/mychannel",
+      "consensusRelation": "consenter",
+      "status": "active",
+      "height": 1
+    }
+    ```
+  </Step>
+  <Step title="Join remaining orderers">
+    Repeat the `osnadmin channel join` command for each additional ordering node in the cluster, pointing to each orderer's admin endpoint.
+  </Step>
+  <Step title="Verify channel membership">
+    ```bash
+    osnadmin channel list \
+      -o orderer1.example.com:9443 \
+      --ca-file $ORDERER_CA \
+      --client-cert $ADMIN_TLS_CERT \
+      --client-key $ADMIN_TLS_KEY
+    ```
+  </Step>
+</Steps>
+
+## Raft configuration
+
+Key Raft parameters in `configtx.yaml` (set when creating the genesis block):
+
+```yaml
+Orderer:
+  OrdererType: etcdraft
+  EtcdRaft:
+    Consenters:
+      - Host: orderer1.example.com
+        Port: 7050
+        ClientTLSCert: path/to/orderer1-tls.crt
+        ServerTLSCert: path/to/orderer1-tls.crt
+    Options:
+      TickInterval: 500ms
+      ElectionTick: 10
+      HeartbeatTick: 1
+      MaxInflightBlocks: 5
+      SnapshotIntervalSize: 16 MB
+  BatchTimeout: 2s
+  BatchSize:
+    MaxMessageCount: 500
+    AbsoluteMaxBytes: 99 MB
+    PreferredMaxBytes: 2 MB
+```
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `ElectionTick` | Ticks before follower starts an election | 10 |
+| `HeartbeatTick` | Ticks between leader heartbeats | 1 |
+| `TickInterval` | Duration of one tick | 500ms |
+| `MaxInflightBlocks` | Max in-flight block replication | 5 |
+| `SnapshotIntervalSize` | WAL size before snapshotting | 16 MB |
+
+## High availability recommendations
+
+<CardGroup cols={2}>
+  <Card title="3 nodes" icon="circle-nodes">
+    Tolerates 1 node failure. Minimum for production.
+  </Card>
+  <Card title="5 nodes" icon="circle-nodes">
+    Tolerates 2 node failures. Recommended for mission-critical networks.
+  </Card>
+</CardGroup>
+
+<Warning>
+Never deploy a single orderer node in production — a single node has no fault tolerance and constitutes a single point of failure.
+</Warning>
+
+## Operations and health
+
+The orderer exposes an operations endpoint (default port `8443`) with four resources:
+
+```bash
+# Health check — returns {"status":"OK"} when healthy
+curl https://orderer.example.com:8443/healthz
+
+# Version — returns version and commit SHA as JSON
+curl https://orderer.example.com:8443/version
+
+# Prometheus metrics
+curl https://orderer.example.com:8443/metrics
+
+# Log level — GET to read, PUT to update at runtime
+curl https://orderer.example.com:8443/logspec
+# Returns: {"spec":"info"}
+
+# Update log level (requires client cert)
+curl -X PUT https://orderer.example.com:8443/logspec \
+  --cert admin.crt --key admin.key \
+  -H 'Content-Type: application/json' \
+  -d '{"spec":"orderer=debug:info"}'
+```
+
+Configure in `orderer.yaml`:
+
+```yaml
+Operations:
+  ListenAddress: 0.0.0.0:8443
+  TLS:
+    Enabled: true
+    Certificate: tls/server.crt
+    PrivateKey: tls/server.key
+    ClientAuthRequired: false
+```

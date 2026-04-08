@@ -1,0 +1,412 @@
+---
+title: Using the test network
+description: Launch a local Hyperledger Fabric network, create a channel, deploy chaincode, and interact with the ledger using the fabric-samples test network scripts.
+---
+
+The `fabric-samples` repository includes a pre-configured test network for learning and development. It runs entirely on your local machine using Docker Compose and provides a safe environment to experiment with Fabric features, test smart contracts, and explore the transaction lifecycle.
+
+<Warning>
+  The test network is intended for education and testing only. It is not a template for production deployments. Modifications to the `network.sh` scripts are discouraged — they can break the network in ways that are difficult to debug.
+</Warning>
+
+## What the test network includes
+
+- **Two peer organizations** — Org1 and Org2, each operating one peer node (`peer0.org1.example.com` and `peer0.org2.example.com`).
+- **One ordering organization** — running a single-node Raft ordering service (`orderer.example.com`).
+- **Docker Compose isolation** — all nodes run inside a Docker Compose network and cannot connect to external Fabric nodes.
+- **cryptogen or Fabric CA** — choose between a lightweight dev tool or a production-like CA setup.
+
+---
+
+## Main workflow
+
+<Steps>
+  <Step title="Navigate to the test network directory">
+    All `network.sh` commands must be run from inside the `test-network` directory:
+
+    ```bash
+    cd fabric-samples/test-network
+    ```
+  </Step>
+
+  <Step title="Clean up any previous runs">
+    Always start fresh to avoid conflicts with leftover containers, volumes, or crypto material:
+
+    ```bash
+    ./network.sh down
+    ```
+  </Step>
+
+  <Step title="Bring up the network">
+    ```bash
+    ./network.sh up
+    ```
+
+    This creates two peer nodes and one ordering node. No channel is created yet.
+
+    When the command succeeds, you will see the containers listed:
+
+    ```text
+    Creating network "fabric_test" with the default driver
+    Creating volume "net_orderer.example.com" with default driver
+    Creating volume "net_peer0.org1.example.com" with default driver
+    Creating volume "net_peer0.org2.example.com" with default driver
+    Creating peer0.org2.example.com ... done
+    Creating orderer.example.com    ... done
+    Creating peer0.org1.example.com ... done
+    CONTAINER ID   IMAGE                               COMMAND           CREATED        STATUS                  PORTS
+    b6b117c81c7f   hyperledger/fabric-peer:latest      "peer node start" 2 seconds ago  Up 1 second             0.0.0.0:7051->7051/tcp   peer0.org1.example.com
+    703ead770e05   hyperledger/fabric-orderer:latest   "orderer"         2 seconds ago  Up Less than a second   0.0.0.0:7050->7050/tcp   orderer.example.com
+    718d43f5f312   hyperledger/fabric-peer:latest      "peer node start" 2 seconds ago  Up 1 second             0.0.0.0:9051->9051/tcp   peer0.org2.example.com
+    ```
+
+    Verify with:
+
+    ```bash
+    docker ps -a
+    ```
+
+    <Info>
+      If you don't see the containers listed, jump to the [troubleshooting section](#troubleshooting) below.
+    </Info>
+  </Step>
+
+  <Step title="Create a channel">
+    Channels are private communication layers between specific network members. Each channel has its own ledger.
+
+    Create a channel with the default name `mychannel`:
+
+    ```bash
+    ./network.sh createChannel
+    ```
+
+    On success:
+
+    ```text
+    Channel 'mychannel' joined
+    ```
+
+    To create a channel with a custom name:
+
+    ```bash
+    ./network.sh createChannel -c channel1
+    ```
+
+    <Warning>
+      Channel names must:
+      - Contain only lowercase ASCII alphanumerics, dots (`.`), and dashes (`-`)
+      - Be shorter than 250 characters
+      - Start with a letter
+    </Warning>
+
+    You can also bring up the network and create a channel in one step:
+
+    ```bash
+    ./network.sh up createChannel
+    ```
+  </Step>
+
+  <Step title="Deploy chaincode">
+    Smart contracts in Fabric are packaged and deployed as *chaincode*. The test network includes the **asset-transfer (basic)** sample chaincode, which manages a simple set of assets on the ledger.
+
+    Deploy the Go version:
+
+    ```bash
+    ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-go -ccl go
+    ```
+
+    Or choose a different language with the `-ccl` flag:
+
+    <Tabs>
+      <Tab title="Go">
+        ```bash
+        ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-go -ccl go
+        ```
+      </Tab>
+      <Tab title="TypeScript">
+        ```bash
+        ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-typescript -ccl typescript
+        ```
+      </Tab>
+      <Tab title="JavaScript">
+        ```bash
+        ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-javascript -ccl javascript
+        ```
+      </Tab>
+      <Tab title="Java">
+        ```bash
+        ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-java -ccl java
+        ```
+      </Tab>
+    </Tabs>
+
+    The `deployCC` command packages the chaincode, installs it on both `peer0.org1.example.com` and `peer0.org2.example.com`, then approves and commits the chaincode definition on `mychannel`.
+  </Step>
+
+  <Step title="Set environment variables for the peer CLI">
+    After deploying chaincode, set up the `peer` CLI to act as Org1:
+
+    ```bash
+    export PATH=${PWD}/../bin:$PATH
+    export FABRIC_CFG_PATH=$PWD/../config/
+
+    # Environment variables for Org1
+    export CORE_PEER_TLS_ENABLED=true
+    export CORE_PEER_LOCALMSPID=Org1MSP
+    export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+    export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+    export CORE_PEER_ADDRESS=localhost:7051
+    ```
+  </Step>
+
+  <Step title="Initialize the ledger">
+    Invoke the `InitLedger` function to populate the ledger with sample assets:
+
+    ```bash
+    peer chaincode invoke \
+      -o localhost:7050 \
+      --ordererTLSHostnameOverride orderer.example.com \
+      --tls \
+      --cafile "${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem" \
+      -C mychannel -n basic \
+      --peerAddresses localhost:7051 \
+      --tlsRootCertFiles "${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt" \
+      --peerAddresses localhost:9051 \
+      --tlsRootCertFiles "${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt" \
+      -c '{"function":"InitLedger","Args":[]}'
+    ```
+
+    Expected output:
+
+    ```text
+    -> INFO 001 Chaincode invoke successful. result: status:200
+    ```
+
+    <Note>
+      The invoke command targets both `peer0.org1.example.com` and `peer0.org2.example.com` because the endorsement policy for the asset-transfer chaincode requires signatures from both Org1 and Org2.
+    </Note>
+  </Step>
+
+  <Step title="Query the ledger">
+    Read all assets from the ledger:
+
+    ```bash
+    peer chaincode query -C mychannel -n basic -c '{"Args":["GetAllAssets"]}'
+    ```
+
+    Expected output:
+
+    ```json
+    [
+      {"ID": "asset1", "color": "blue",   "size": 5,  "owner": "Tomoko",  "appraisedValue": 300},
+      {"ID": "asset2", "color": "red",    "size": 5,  "owner": "Brad",    "appraisedValue": 400},
+      {"ID": "asset3", "color": "green",  "size": 10, "owner": "Jin Soo", "appraisedValue": 500},
+      {"ID": "asset4", "color": "yellow", "size": 10, "owner": "Max",     "appraisedValue": 600},
+      {"ID": "asset5", "color": "black",  "size": 15, "owner": "Adriana", "appraisedValue": 700},
+      {"ID": "asset6", "color": "white",  "size": 15, "owner": "Michel",  "appraisedValue": 800}
+    ]
+    ```
+  </Step>
+
+  <Step title="Transfer an asset">
+    Invoke the `TransferAsset` function to change the owner of `asset6`:
+
+    ```bash
+    peer chaincode invoke \
+      -o localhost:7050 \
+      --ordererTLSHostnameOverride orderer.example.com \
+      --tls \
+      --cafile "${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem" \
+      -C mychannel -n basic \
+      --peerAddresses localhost:7051 \
+      --tlsRootCertFiles "${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt" \
+      --peerAddresses localhost:9051 \
+      --tlsRootCertFiles "${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt" \
+      -c '{"function":"TransferAsset","Args":["asset6","Christopher"]}'
+    ```
+
+    Expected output:
+
+    ```text
+    2019-12-04 17:38:21.048 EST [chaincodeCmd] chaincodeInvokeOrQuery -> INFO 001 Chaincode invoke successful. result: status:200
+    ```
+  </Step>
+
+  <Step title="Verify the transfer from Org2">
+    Switch the CLI to operate as Org2 and query the updated asset:
+
+    ```bash
+    # Environment variables for Org2
+    export CORE_PEER_TLS_ENABLED=true
+    export CORE_PEER_LOCALMSPID=Org2MSP
+    export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+    export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+    export CORE_PEER_ADDRESS=localhost:9051
+    ```
+
+    ```bash
+    peer chaincode query -C mychannel -n basic -c '{"Args":["ReadAsset","asset6"]}'
+    ```
+
+    Expected output:
+
+    ```json
+    {"ID":"asset6","color":"white","size":15,"owner":"Christopher","appraisedValue":800}
+    ```
+  </Step>
+
+  <Step title="Bring down the network">
+    When you are finished, stop all containers and clean up all artifacts:
+
+    ```bash
+    ./network.sh down
+    ```
+
+    This stops and removes all node and chaincode containers, deletes crypto material, removes chaincode images, channel artifacts, and Docker volumes. Running this command prepares the environment for a clean `./network.sh up` on your next session.
+  </Step>
+</Steps>
+
+---
+
+## Additional options
+
+### Using Certificate Authorities
+
+By default, `network.sh` uses the `cryptogen` tool to generate test certificates. For a more production-like setup, you can bring up the network using Fabric Certificate Authorities:
+
+```bash
+./network.sh up -ca
+```
+
+This starts three Fabric CAs — one for each organization — and uses them to register and enroll all node and user identities. The Fabric CA client generates an MSP folder for each identity containing the certificate and private key.
+
+Inspect the Org1 admin MSP:
+
+```bash
+tree organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/
+```
+
+```text
+organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/
+└── msp
+    ├── IssuerPublicKey
+    ├── IssuerRevocationPublicKey
+    ├── cacerts
+    │   └── localhost-7054-ca-org1.pem
+    ├── config.yaml
+    ├── keystore
+    │   └── 58e81e6f1ee8930df46841bf88c22a08ae53c1332319854608539ee78ed2fd65_sk
+    ├── signcerts
+    │   └── cert.pem
+    └── user
+```
+
+### Using BFT ordering
+
+Starting with Fabric v3.0, you can use the Byzantine Fault Tolerant (BFT) ordering service. This configuration runs 4 orderer nodes instead of one:
+
+```bash
+./network.sh up -bft
+./network.sh createChannel -bft
+```
+
+You can then deploy chaincode and interact with the network exactly as described in the main workflow above.
+
+---
+
+## SELinux
+
+On SELinux-enabled distributions (Fedora, RHEL), you must modify the compose files before starting the network. See the [prerequisites page](/getting-started/prerequisites) for the required volume label changes.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Containers fail to start or produce errors on restart">
+    Always run `./network.sh down` between runs. Leftover containers, volumes, and crypto material from previous runs cause unpredictable failures:
+
+    ```bash
+    ./network.sh down
+    ```
+  </Accordion>
+
+  <Accordion title="Docker errors and image issues">
+    First check your Docker version meets the minimum requirement (19.x). Then try restarting Docker.
+
+    If problems persist, remove all containers and images and start over:
+
+    ```bash
+    docker rm -f $(docker ps -aq)
+    docker rmi -f $(docker images -q)
+    ```
+  </Accordion>
+
+  <Accordion title="gRPC FUSE error on macOS during chaincode install">
+    If you see an error like:
+
+    ```text
+    Error: chaincode install failed with status: 500 - ... dial unix /host/var/run/docker.sock: connect: no such file or directory
+    ```
+
+    Open Docker Desktop settings and change the file sharing implementation away from **gRPC FUSE**.
+  </Accordion>
+
+  <Accordion title="Chaincode already exists error">
+    If you see an error mentioning a chaincode that already exists, remove the stale chaincode images:
+
+    ```bash
+    docker rmi -f $(docker images | grep dev-peer[0-9] | awk '{print $3}')
+    ```
+  </Accordion>
+
+  <Accordion title="FABRIC_CFG_PATH error from configtxgen">
+    If you see:
+
+    ```text
+    [configtx/tool/localconfig] Load -> CRIT 002 Error reading configuration: Unsupported Config Type ""
+    ```
+
+    The `FABRIC_CFG_PATH` environment variable is not set correctly. Re-run:
+
+    ```bash
+    export FABRIC_CFG_PATH=$PWD/../config/
+    ```
+  </Accordion>
+
+  <Accordion title="Active endpoints error">
+    Prune unused Docker networks:
+
+    ```bash
+    docker network prune
+    ```
+
+    Confirm the prompt with `y`.
+  </Accordion>
+
+  <Accordion title="Bad interpreter: /bin/bash^M (Windows line endings)">
+    If you see `/bin/bash^M: bad interpreter`, your shell scripts have Windows-style CRLF line endings. Fix with vim:
+
+    ```bash
+    vim ./fabric-samples/test-network/scripts/createChannel.sh
+    ```
+
+    Then run `:set ff=unix` inside vim and save.
+
+    Prevent this in future by configuring Git before cloning:
+
+    ```bash
+    git config --global core.autocrlf false
+    ```
+  </Accordion>
+</AccordionGroup>
+
+If you continue to see errors, share your logs on a Fabric [Discord channel](https://discord.com/invite/hyperledger) or on [StackOverflow](https://stackoverflow.com/questions/tagged/hyperledger-fabric).
+
+---
+
+## Next steps
+
+<Card title="Build your first application" href="/getting-started/first-application" icon="code">
+  Use the Fabric Gateway client API to build a Go, Node.js, or Java application that submits transactions and queries the ledger.
+</Card>

@@ -1,0 +1,402 @@
+---
+title: "Deploying peers"
+description: "Plan, configure, and deploy Hyperledger Fabric peer nodes for production, including core.yaml configuration, CouchDB setup, gossip, TLS, and monitoring."
+---
+
+Peer nodes host ledgers and run smart contracts. They are the workhorses of a Fabric network. This page covers everything you need to deploy production peers: planning decisions, key `core.yaml` parameters, starting the peer, and ongoing operations.
+
+<Note>
+  Complete the [deployment overview](/deployment/overview) steps first — you need a running CA and enrolled MSP material before you can start a peer.
+</Note>
+
+## Planning your peer deployment
+
+### Peer roles and counts
+
+Each peer:
+
+- Stores a copy of the ledger for every channel it has joined.
+- Executes chaincode to simulate and endorse transactions.
+- Participates in gossip to disseminate blocks and private data.
+
+For high availability, deploy **at least two peers per organization** on separate VMs or nodes. Client applications should use the Fabric Gateway or service discovery to automatically route to available peers.
+
+### State database choice
+
+| Database | When to use |
+|---|---|
+| `goleveldb` (default) | Key-value lookups only; best performance; embedded in the peer process |
+| CouchDB | Rich JSON queries needed; runs as a separate container |
+
+All peers on a channel must use the same database type. Keys and values valid in LevelDB may not be valid in CouchDB, so this decision affects chaincode design.
+
+### Resource sizing
+
+A typical peer deployment involves multiple containers:
+
+- **Peer container** — the peer process itself, plus the LevelDB state database if not using CouchDB.
+- **CouchDB container** (optional) — one per peer; stores the state database for all channels on that peer.
+- **Chaincode launcher container** (optional) — a small container that creates and manages chaincode containers.
+- **Chaincode containers** — one per installed chaincode package per peer.
+
+Plan approximately three times the resources of a single ordering node for each peer container. Storage grows with ledger history; monitor it and extend as needed.
+
+## Downloading peer binaries
+
+Download the Fabric release binaries from [GitHub](https://github.com/hyperledger/fabric/releases). Extract the archive to find:
+
+```
+fabric/
+├── bin/
+│   ├── peer
+│   ├── configtxgen
+│   └── ...
+└── config/
+    ├── core.yaml
+    └── ...
+```
+
+Add the `bin` directory to your `PATH` and set `FABRIC_CFG_PATH` to point to the directory containing `core.yaml`:
+
+```bash
+export PATH=/path/to/fabric/bin:$PATH
+export FABRIC_CFG_PATH=/path/to/fabric/config
+```
+
+## Preparing certificates
+
+Before starting a peer, you need:
+
+- **Peer local MSP** — enrollment certificate and private key from the enrollment CA.
+- **Peer TLS certificates** — TLS certificate, TLS private key, and TLS CA root certificate from the TLS CA.
+
+Organize them using the recommended folder structure:
+
+```
+organizations/
+└── peerOrganizations/
+    └── org1.example.com/
+        ├── msp/
+        └── peers/
+            └── peer0.org1.example.com/
+                ├── msp/
+                └── tls/
+```
+
+Store this data on persistent volumes. If the container is destroyed without persistent storage, all MSP material is lost.
+
+## Configuring core.yaml
+
+The `core.yaml` file controls all peer behavior. Edit it directly, or override values using environment variables with the `CORE_` prefix (e.g., `peer.localMspId` → `CORE_PEER_LOCALMSPID`).
+
+The sections below cover the parameters you must customize.
+
+### Identity
+
+```yaml
+peer:
+  # A name for this peer instance, used for chaincode container naming.
+  id: peer0.org1.example.com
+
+  # Logical network name, used in chaincode container names.
+  networkId: production
+
+  # MSP ID of the organization that owns this peer.
+  # Must match the MSP ID in every channel this peer joins.
+  localMspId: Org1MSP
+
+  # Path to the peer's local MSP folder.
+  mspConfigPath: /var/hyperledger/production/msp
+
+  # Where the peer stores ledger data and installed chaincodes.
+  fileSystemPath: /var/hyperledger/production
+```
+
+<Warning>
+  `localMspId` must exactly match the MSP ID defined in the channel configuration for the peer's organization. A mismatch will cause the peer's messages to be rejected by other nodes.
+</Warning>
+
+### Addresses
+
+```yaml
+peer:
+  # Address where this peer listens for incoming connections.
+  listenAddress: 0.0.0.0:7051
+
+  # Address that other peers in the same org use to reach this peer.
+  address: peer0.org1.example.com:7051
+
+  # Address where this peer listens for chaincode connections.
+  chaincodeListenAddress: 0.0.0.0:7052
+
+  # Address that chaincode containers use to connect back to this peer.
+  chaincodeAddress: peer0.org1.example.com:7052
+```
+
+### TLS
+
+Enable TLS for all communications in production. See [Security and TLS](/deployment/security-and-tls) for certificate generation details.
+
+```yaml
+peer:
+  tls:
+    # Enable TLS — required for production.
+    enabled: true
+
+    # Peer's TLS server certificate (public key).
+    cert:
+      file: tls/server.crt
+
+    # Peer's TLS private key.
+    key:
+      file: tls/server.key
+
+    # TLS CA root certificate, used to verify outbound connections.
+    rootcert:
+      file: tls/ca.crt
+
+    # Set to true to require clients to present a certificate (mutual TLS).
+    clientAuthRequired: false
+
+    # CA certificates used to verify client certificates when mTLS is enabled.
+    clientRootCAs:
+      files:
+        - tls/ca.crt
+```
+
+### Gossip
+
+Gossip is required for service discovery and private data dissemination.
+
+```yaml
+peer:
+  gossip:
+    # Other peers in this org to contact on startup.
+    bootstrap: peer1.org1.example.com:7051
+
+    # Address published to peers within this organization.
+    endpoint: peer0.org1.example.com:7051
+
+    # Address published to peers in other organizations.
+    # Required for cross-org service discovery.
+    externalEndpoint: peer0.org1.example.com:7051
+
+    # Recommended: set to false so blocks come from the orderer, not via gossip.
+    useLeaderElection: false
+
+    # Recommended: set to true so this peer pulls blocks directly from the orderer.
+    orgLeader: true
+
+    # Recommended: set to false (default) since orgLeader=true is preferred.
+    state:
+      enabled: false
+```
+
+<Note>
+  At least one anchor peer per organization must be configured in each channel configuration. Anchor peers enable cross-organization gossip and service discovery.
+</Note>
+
+### Ledger and state database
+
+```yaml
+ledger:
+  state:
+    # Options: goleveldb (default) or CouchDB
+    stateDatabase: goleveldb
+
+    # Required if using CouchDB
+    couchDBConfig:
+      couchDBAddress: 127.0.0.1:5984
+      username: admin
+      # Pass the password via environment variable:
+      # CORE_LEDGER_STATE_COUCHDBCONFIG_PASSWORD=secret
+      password:
+
+  snapshots:
+    # Where ledger snapshots are written.
+    rootDir: /var/hyperledger/production/snapshots
+```
+
+### Operations and metrics
+
+The operations service exposes health check and metrics endpoints. It requires mutual TLS.
+
+```yaml
+operations:
+  listenAddress: 127.0.0.1:9443
+  tls:
+    enabled: true
+    cert:
+      file: tls/server.crt
+    key:
+      file: tls/server.key
+    # Must be true for the operations service.
+    clientAuthRequired: true
+    clientRootCAs:
+      files: []
+
+metrics:
+  # Options: disabled, statsd, prometheus
+  provider: prometheus
+  statsd:
+    network: udp
+    address: 127.0.0.1:8125
+```
+
+## Starting a peer
+
+After configuring `core.yaml` and setting up persistent storage, start the peer:
+
+```bash
+peer node start
+```
+
+A successful start produces a log line similar to:
+
+```
+[nodeCmd] serve -> INFO 017 Started peer with ID=[peer0.org1.example.com], network ID=[prod], address=[peer0.org1.example.com:7051]
+```
+
+### Common startup errors
+
+<Accordion title="Fatal error: Could not find config file">
+  `FABRIC_CFG_PATH` is not set or points to the wrong directory.
+
+  ```bash
+  export FABRIC_CFG_PATH=/path/to/config
+  ```
+</Accordion>
+
+<Accordion title="Error: local MSP not found">
+  The path specified in `peer.mspConfigPath` does not exist or is missing required files. Verify the folder contains `cacerts/`, `signcerts/`, `keystore/`, and `config.yaml`.
+</Accordion>
+
+## Joining a channel
+
+Once the peer is running, join it to a channel. The organization must already be a member of the channel.
+
+```bash
+peer channel join -b <path-to-genesis-block.block>
+```
+
+After joining, install and approve chaincode using the Fabric lifecycle:
+
+```bash
+peer lifecycle chaincode install chaincode.tar.gz
+peer lifecycle chaincode approveformyorg ...
+```
+
+## CouchDB setup
+
+When `ledger.state.stateDatabase` is set to `CouchDB`, run a CouchDB instance alongside each peer. CouchDB must be started before the peer.
+
+```bash
+docker run -d \
+  --name couchdb \
+  -e COUCHDB_USER=admin \
+  -e COUCHDB_PASSWORD=password \
+  -p 5984:5984 \
+  couchdb:3.3
+```
+
+Set the corresponding `couchDBAddress`, `username`, and `password` in `core.yaml` (or via environment variables).
+
+<Warning>
+  Never map the CouchDB port directly to a publicly accessible server port. Run CouchDB on the same host as the peer or within the same Kubernetes pod and restrict external access.
+</Warning>
+
+## Using an HSM for private key protection
+
+To store the peer's signing private key in a Hardware Security Module, configure the `BCCSP` section of `core.yaml`:
+
+```yaml
+peer:
+  BCCSP:
+    Default: PKCS11
+    PKCS11:
+      Library: /etc/hyperledger/fabric/libsofthsm2.so
+      Label: fabric
+      Pin: "71811222"
+      Hash: SHA2
+      Security: 256
+```
+
+See [Security and TLS](/deployment/security-and-tls) for full HSM setup instructions.
+
+## Health checks and monitoring
+
+The peer's operations service exposes four endpoints on the configured operations port (default `9443`):
+
+### /healthz — health check
+
+```bash
+curl https://localhost:9443/healthz
+```
+
+A healthy peer returns `{"status":"OK"}`. No client certificate is required unless `clientAuthRequired` is true.
+
+### /metrics — Prometheus metrics
+
+Configure Prometheus to scrape:
+
+```
+https://<peer-host>:9443/metrics
+```
+
+Key metrics to watch:
+
+- `ledger_blockchain_height` — current block height per channel.
+- `endorser_proposals_received` — rate of endorsement requests.
+- `gossip_state_height` — gossip-reported ledger height.
+
+### /logspec — log level management
+
+View or update the active logging specification at runtime without restarting the peer:
+
+```bash
+# Get current log spec
+curl https://localhost:9443/logspec
+
+# Response
+{"spec":"info"}
+
+# Set log spec (requires client cert even if clientAuthRequired is false)
+curl -X PUT https://localhost:9443/logspec \
+  --cert admin.crt --key admin.key \
+  -H 'Content-Type: application/json' \
+  -d '{"spec":"chaincode=debug:info"}'
+```
+
+A successful `PUT` returns HTTP `204 No Content`. On error, returns HTTP `400` with `{"error":"<message>"}`.
+
+### /version — peer version
+
+```bash
+curl https://localhost:9443/version
+```
+
+Returns a JSON document with the peer version and commit SHA.
+
+## Upgrading a peer
+
+<Steps>
+  <Step title="Download the new binary">
+    Download the new Fabric release. Do not replace `core.yaml` directly — compare the new sample against your customized version and port only the changes.
+  </Step>
+  <Step title="Back up data directories">
+    Back up `peer.fileSystemPath` and your MSP material before proceeding.
+  </Step>
+  <Step title="Stop the peer">
+    Gracefully stop the peer process or container.
+  </Step>
+  <Step title="Replace the binary">
+    Replace the `peer` binary with the new version.
+  </Step>
+  <Step title="Restart the peer">
+    Start the peer with `peer node start`. The ledger will be opened with the new binary and will catch up if it missed blocks during the downtime.
+  </Step>
+</Steps>
+
+<Tip>
+  To minimize downtime, upgrade peers one at a time. Because you have at least two peers per organization, the remaining peer continues to serve endorsement requests during the upgrade.
+</Tip>

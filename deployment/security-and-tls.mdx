@@ -1,0 +1,217 @@
+---
+title: "Security and TLS"
+description: "Configure TLS, mutual TLS, and Hardware Security Modules (HSM) for a production Hyperledger Fabric network."
+---
+
+TLS is essential in any production Fabric deployment. All communication between peers, orderers, clients, and the operations service should be encrypted and authenticated using TLS certificates.
+
+<Warning>
+Never run a production Fabric network without TLS enabled. Unencrypted gRPC connections expose sensitive transaction data and private keys to interception.
+</Warning>
+
+## One-way vs mutual TLS
+
+| Mode | Server cert | Client cert | Use case |
+|------|-------------|-------------|----------|
+| **One-way TLS** | Required | Not required | Client authenticates the server |
+| **Mutual TLS (mTLS)** | Required | Required | Both sides authenticate each other |
+
+Fabric recommends mutual TLS for peer-to-orderer and peer-to-peer communication in production.
+
+## Configuring TLS on peers
+
+In `core.yaml`:
+
+```yaml
+peer:
+  tls:
+    # Enable TLS (required for production)
+    enabled: true
+    # Path to the peer's TLS private key
+    key:
+      file: tls/server.key
+    # Path to the peer's TLS certificate
+    cert:
+      file: tls/server.crt
+    # Path to the root CA certificate used to verify orderers/peers
+    rootcert:
+      file: tls/ca.crt
+    # Enable mutual TLS (clients must present a certificate)
+    clientAuthRequired: false
+    # Root CA certificates for verifying client certificates
+    clientRootCAs:
+      files:
+        - tls/ca.crt
+```
+
+Using environment variables:
+
+```bash
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_TLS_KEY_FILE=/path/to/tls/server.key
+export CORE_PEER_TLS_CERT_FILE=/path/to/tls/server.crt
+export CORE_PEER_TLS_ROOTCERT_FILE=/path/to/tls/ca.crt
+```
+
+## Configuring TLS on orderers
+
+In `orderer.yaml`:
+
+```yaml
+General:
+  TLS:
+    Enabled: true
+    PrivateKey: tls/server.key
+    Certificate: tls/server.crt
+    RootCAs:
+      - tls/ca.crt
+    # Mutual TLS: require clients to present a certificate
+    ClientAuthRequired: false
+    ClientRootCAs:
+      - tls/ca.crt
+```
+
+## Generating TLS certificates with Fabric CA
+
+<Steps>
+  <Step title="Deploy a TLS CA">
+    Deploy a dedicated TLS CA separate from your enrollment CA:
+
+    ```bash
+    fabric-ca-server start \
+      --ca.name tls-ca \
+      --port 7054 \
+      -b tls-admin:tls-adminpw
+    ```
+  </Step>
+  <Step title="Enroll the TLS CA admin">
+    ```bash
+    fabric-ca-client enroll \
+      -u https://tls-admin:tls-adminpw@tls-ca.example.com:7054 \
+      --tls.certfiles /path/to/tls-ca-cert.pem \
+      --mspdir /path/to/tls-ca-admin/msp
+    ```
+  </Step>
+  <Step title="Register and enroll a peer's TLS identity">
+    ```bash
+    # Register
+    fabric-ca-client register \
+      --id.name peer0.org1 \
+      --id.secret peer0pw \
+      --id.type peer \
+      --tls.certfiles /path/to/tls-ca-cert.pem \
+      --mspdir /path/to/tls-ca-admin/msp \
+      -u https://tls-ca.example.com:7054
+
+    # Enroll (generates TLS cert/key pair)
+    fabric-ca-client enroll \
+      -u https://peer0.org1:peer0pw@tls-ca.example.com:7054 \
+      --enrollment.profile tls \
+      --csr.hosts peer0.org1.example.com \
+      --tls.certfiles /path/to/tls-ca-cert.pem \
+      --mspdir /path/to/peer0/tls
+    ```
+  </Step>
+</Steps>
+
+## Operations service TLS
+
+<Note>
+The operations service **must** use a TLS CA that is entirely separate from the Fabric network CAs. This prevents network members from using their existing credentials to access the operations API.
+</Note>
+
+Configure in `core.yaml` (peer) or `orderer.yaml` (orderer):
+
+```yaml
+# core.yaml operations section
+operations:
+  listenAddress: 0.0.0.0:9443
+  tls:
+    enabled: true
+    cert:
+      file: tls/operations.crt
+    key:
+      file: tls/operations.key
+    clientAuthRequired: false
+    clientRootCAs:
+      files: []
+```
+
+## Hardware Security Modules (HSM)
+
+HSMs store private keys in tamper-proof hardware. Fabric supports HSMs via the PKCS#11 interface.
+
+### When to use HSM
+
+- Regulatory requirements mandate hardware key protection
+- Keys for root CAs or high-value identities need additional protection
+- Compliance with FIPS 140-2/3 is required
+
+### Configuring PKCS11
+
+In `core.yaml`:
+
+```yaml
+peer:
+  BCCSP:
+    Default: PKCS11
+    PKCS11:
+      Library: /usr/lib/softhsm/libsofthsm2.so
+      Pin: "98765432"
+      Label: ForFabric
+      hash: SHA2
+      security: 256
+```
+
+For the orderer in `orderer.yaml`:
+
+```yaml
+General:
+  BCCSP:
+    Default: PKCS11
+    PKCS11:
+      Library: /usr/lib/softhsm/libsofthsm2.so
+      Pin: "98765432"
+      Label: ForFabric
+      hash: SHA2
+      security: 256
+```
+
+### Supported HSMs
+
+- SoftHSM v2 (for testing/development)
+- AWS CloudHSM
+- Thales Luna HSM
+- Any PKCS#11-compliant HSM
+
+## Certificate expiry and rotation
+
+<Warning>
+Fabric does not automatically renew certificates. Set up monitoring to alert when certificates are approaching expiry (typically 30–90 days before expiration).
+</Warning>
+
+Certificate rotation for **TLS certificates** (non-breaking, can be done without downtime):
+
+1. Generate new TLS certificates using the TLS CA
+2. Update the `tls/` directory on the node
+3. Update the node's `core.yaml` or `orderer.yaml` to point to the new certificate
+4. Restart the node (peers/orderers pick up the new TLS cert on restart)
+
+For **enrollment certificates** (signing certs), coordinate with channel members as the MSP configuration may need updating in the channel config.
+
+## Security best practices
+
+<AccordionGroup>
+  <Accordion title="Use separate CAs for TLS and enrollment">
+    Always deploy a dedicated TLS CA and a separate enrollment CA per organization. Sharing a single CA for both purposes reduces security isolation.
+  </Accordion>
+  <Accordion title="Enable mutual TLS between network components">
+    Set `clientAuthRequired: true` on orderers and peers to ensure only authorized nodes can connect.
+  </Accordion>
+  <Accordion title="Restrict the operations endpoint">
+    The operations service exposes health and metrics. Use a dedicated operations TLS CA and, where possible, bind the operations listener to a private network interface.
+  </Accordion>
+  <Accordion title="Rotate certificates before expiry">
+    Monitor certificate expiry with tools like `openssl x509 -noout -dates -in cert.pem`. Set alerts at 90, 60, and 30 days before expiration.
+  </Accordion>
+</AccordionGroup>

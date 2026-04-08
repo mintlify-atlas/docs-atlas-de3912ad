@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Hyperledger Fabric",
+  "projectType": "framework",
+  "projectName": "Hyperledger Fabric",
+  "projectDescription": "An enterprise-grade permissioned distributed ledger framework with modular consensus, pluggable identity management, and smart contract support for building blockchain solutions.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#1A4B8C",
-    "light": "#3A7BD5",
-    "dark": "#0D2B5E"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/hyperledger/fabric"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/hyperledger/fabric"
-    }
-  },
+  "primaryColor": "#1A4B8C",
+  "lightColor": "#3A7BD5",
+  "darkColor": "#0D2B5E",
   "navigation": {
     "tabs": [
       {
@@ -95,5 +83,28 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Permissioned blockchain with known participant identities",
+    "Modular pluggable consensus (Raft CFT and SmartBFT)",
+    "Smart contracts (chaincode) in Go, Java, and Node.js",
+    "Execute-order-validate transaction model for performance and scalability",
+    "Channel-based privacy and private data collections",
+    "Membership Service Provider (MSP) for identity management",
+    "Fabric Gateway for simplified client application development",
+    "Operations service for health monitoring and metrics"
+  ],
+  "publicApiSurface": [
+    "peer node start",
+    "peer lifecycle chaincode install/approve/commit",
+    "peer channel create/join/fetch",
+    "peer chaincode invoke/query",
+    "configtxgen -outputBlock/-outputCreateChannelTx",
+    "configtxlator proto_encode/proto_decode/compute_update",
+    "cryptogen generate/showtemplate",
+    "osnadmin channel join/list/remove",
+    "ledgerutil compare/identifytxs",
+    "Fabric Gateway gRPC service (Endorse/Submit/CommitStatus/ChaincodeEvents)",
+    "Operations REST API (/healthz, /metrics, /logspec, /version)"
+  ]
 }

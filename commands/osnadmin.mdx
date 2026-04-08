@@ -1,0 +1,184 @@
+---
+title: "osnadmin channel"
+description: "Manage channel participation on Fabric ordering nodes using the channel participation API."
+---
+
+`osnadmin channel` manages channel membership for ordering nodes without requiring a system channel. This is the standard approach since Fabric v2.4.
+
+## Prerequisites
+
+The ordering node must have its admin endpoint configured and TLS enabled. The admin endpoint is separate from the ordering endpoint and requires mutual TLS:
+
+```yaml orderer.yaml
+General:
+  Admin:
+    ListenAddress: 0.0.0.0:9443
+    TLS:
+      Enabled: true
+      Certificate: tls/server.crt
+      PrivateKey: tls/server.key
+      ClientAuthRequired: true
+      ClientRootCAs:
+        - tls/ca.crt
+```
+
+## Global flags
+
+These flags apply to all `osnadmin channel` subcommands:
+
+| Flag | Description |
+|------|-------------|
+| `-o, --orderer-address` | Admin endpoint of the ordering node (e.g. `orderer.example.com:9443`) |
+| `--ca-file` | Path to TLS CA certificate(s) for the orderer |
+| `--client-cert` | Path to client TLS certificate (for mutual TLS) |
+| `--client-key` | Path to client TLS private key (for mutual TLS) |
+| `--no-status` | Omit the HTTP status line from output |
+
+## osnadmin channel join
+
+Join an ordering node to a channel. Creates the channel if it does not exist.
+
+```bash
+osnadmin channel join \
+  -o orderer.example.com:9443 \
+  --ca-file $ORDERER_CA \
+  --client-cert $ADMIN_TLS_CERT \
+  --client-key $ADMIN_TLS_KEY \
+  --channelID mychannel \
+  --config-block ./channel-artifacts/mychannel.block
+```
+
+| Flag | Description |
+|------|-------------|
+| `-c, --channelID` | Channel ID |
+| `-b, --config-block` | Path to the channel genesis block (or latest config block) |
+
+**Response (HTTP 201):**
+```json
+{
+  "name": "mychannel",
+  "url": "/participation/v1/channels/mychannel",
+  "consensusRelation": "consenter",
+  "status": "active",
+  "height": 1
+}
+```
+
+## osnadmin channel list
+
+List all channels on an ordering node:
+
+```bash
+osnadmin channel list \
+  -o orderer.example.com:9443 \
+  --ca-file $ORDERER_CA \
+  --client-cert $ADMIN_TLS_CERT \
+  --client-key $ADMIN_TLS_KEY
+```
+
+**Response:**
+```json
+{
+  "systemChannel": null,
+  "channels": [
+    {
+      "name": "mychannel",
+      "url": "/participation/v1/channels/mychannel"
+    }
+  ]
+}
+```
+
+To get details for a specific channel, add `--channelID`:
+
+```bash
+osnadmin channel list \
+  -o orderer.example.com:9443 \
+  --ca-file $ORDERER_CA \
+  --client-cert $ADMIN_TLS_CERT \
+  --client-key $ADMIN_TLS_KEY \
+  --channelID mychannel
+```
+
+**Response:**
+```json
+{
+  "name": "mychannel",
+  "url": "/participation/v1/channels/mychannel",
+  "consensusRelation": "consenter",
+  "status": "active",
+  "height": 3
+}
+```
+
+## osnadmin channel remove
+
+Remove a channel from an ordering node:
+
+```bash
+osnadmin channel remove \
+  -o orderer.example.com:9443 \
+  --ca-file $ORDERER_CA \
+  --client-cert $ADMIN_TLS_CERT \
+  --client-key $ADMIN_TLS_KEY \
+  --channelID mychannel
+```
+
+Returns HTTP 204 on success.
+
+<Warning>
+Removing a channel from an orderer deletes all local data for that channel on that node. This is irreversible.
+</Warning>
+
+## Bootstrap workflow
+
+<Steps>
+  <Step title="Generate the genesis block">
+    ```bash
+    configtxgen \
+      -profile ChannelUsingRaft \
+      -outputBlock ./channel-artifacts/mychannel.block \
+      -channelID mychannel
+    ```
+  </Step>
+  <Step title="Join each orderer to the channel">
+    For each orderer node in your cluster:
+
+    ```bash
+    osnadmin channel join \
+      -o orderer1.example.com:9443 \
+      --ca-file $ORDERER_CA \
+      --client-cert $ADMIN_TLS_CERT \
+      --client-key $ADMIN_TLS_KEY \
+      --channelID mychannel \
+      --config-block ./channel-artifacts/mychannel.block
+
+    osnadmin channel join \
+      -o orderer2.example.com:9443 \
+      --ca-file $ORDERER_CA \
+      --client-cert $ADMIN_TLS_CERT \
+      --client-key $ADMIN_TLS_KEY \
+      --channelID mychannel \
+      --config-block ./channel-artifacts/mychannel.block
+    ```
+  </Step>
+  <Step title="Verify channel status">
+    ```bash
+    osnadmin channel list \
+      -o orderer1.example.com:9443 \
+      --ca-file $ORDERER_CA \
+      --client-cert $ADMIN_TLS_CERT \
+      --client-key $ADMIN_TLS_KEY \
+      --channelID mychannel
+    ```
+
+    The `"status": "active"` field confirms the orderer is participating.
+  </Step>
+  <Step title="Join peers to the channel">
+    After the orderers are active, join peers using `peer channel join`:
+
+    ```bash
+    peer channel join -b ./channel-artifacts/mychannel.block
+    ```
+  </Step>
+</Steps>

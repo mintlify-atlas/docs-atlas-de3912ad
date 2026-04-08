@@ -1,0 +1,530 @@
+---
+title: 'Developing chaincode'
+description: 'How to write Hyperledger Fabric smart contracts using the Contract API in Go, Node.js, and Java — including ledger reads and writes, events, private data, and determinism.'
+---
+
+This page covers how to write application chaincode for Hyperledger Fabric. It uses the **asset-transfer (basic)** sample as a running example and covers all major patterns you will need for real-world chaincode.
+
+<Info>
+For a conceptual overview of what chaincode is and how it fits into Fabric's execution model, see the [Smart contracts overview](/chaincode/overview).
+</Info>
+
+## Chaincode structure
+
+### Older shim API (Init / Invoke)
+
+The original chaincode interface requires implementing two methods:
+
+- `Init` — called when the chaincode is first instantiated or upgraded (when `--init-required` is used in the lifecycle).
+- `Invoke` — called for every transaction. Your code reads the function name from the stub and dispatches accordingly.
+
+This low-level style is still supported but is not recommended for new chaincode.
+
+### Contract API (recommended)
+
+The Contract API provides a higher-level programming model. You define a struct (Go) or class (Node.js, Java) that extends the base `Contract` type, and each public method on that struct automatically becomes an invocable transaction function. The peer handles dispatch for you.
+
+The transaction context (`ctx`) passed to each method gives you access to:
+
+- `ctx.GetStub()` (Go) / `ctx.stub` (Node.js) / `ctx.getStub()` (Java) — the shim stub for ledger access
+- The client identity of the transaction submitter
+
+## Contract API: basic structure
+
+<Tabs>
+  <Tab title="Go">
+    ```go
+    package main
+
+    import (
+        "encoding/json"
+        "fmt"
+        "log"
+
+        "github.com/hyperledger/fabric-contract-api-go/contractapi"
+    )
+
+    // SmartContract provides functions for managing an Asset.
+    type SmartContract struct {
+        contractapi.Contract
+    }
+
+    // Asset describes basic details of what makes up a simple asset.
+    // Fields are in alphabetic order to ensure deterministic JSON marshaling.
+    type Asset struct {
+        AppraisedValue int    `json:"AppraisedValue"`
+        Color          string `json:"Color"`
+        ID             string `json:"ID"`
+        Owner          string `json:"Owner"`
+        Size           int    `json:"Size"`
+    }
+
+    func main() {
+        assetChaincode, err := contractapi.NewChaincode(&SmartContract{})
+        if err != nil {
+            log.Panicf("Error creating asset-transfer-basic chaincode: %v", err)
+        }
+
+        if err := assetChaincode.Start(); err != nil {
+            log.Panicf("Error starting asset-transfer-basic chaincode: %v", err)
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Node.js">
+    ```javascript
+    'use strict';
+
+    const { Contract } = require('fabric-contract-api');
+
+    class AssetTransfer extends Contract {
+        // Transaction functions are defined as async methods on this class.
+    }
+
+    module.exports = AssetTransfer;
+    ```
+  </Tab>
+  <Tab title="Java">
+    ```java
+    import org.hyperledger.fabric.contract.Context;
+    import org.hyperledger.fabric.contract.ContractInterface;
+    import org.hyperledger.fabric.contract.annotation.Contract;
+    import org.hyperledger.fabric.contract.annotation.Default;
+    import org.hyperledger.fabric.contract.annotation.Transaction;
+
+    @Contract(name = "AssetTransfer")
+    @Default
+    public final class AssetTransfer implements ContractInterface {
+        // Transaction functions are annotated with @Transaction
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Reading and writing ledger state
+
+All ledger state is stored as key-value pairs. Keys are strings; values are byte arrays (typically JSON-encoded structs).
+
+### Writing state: PutState
+
+<Tabs>
+  <Tab title="Go">
+    ```go
+    // CreateAsset issues a new asset to the world state with given details.
+    func (s *SmartContract) CreateAsset(ctx contractapi.TransactionContextInterface, id string, color string, size int, owner string, appraisedValue int) error {
+        exists, err := s.AssetExists(ctx, id)
+        if err != nil {
+            return err
+        }
+        if exists {
+            return fmt.Errorf("the asset %s already exists", id)
+        }
+
+        asset := Asset{
+            ID:             id,
+            Color:          color,
+            Size:           size,
+            Owner:          owner,
+            AppraisedValue: appraisedValue,
+        }
+        assetJSON, err := json.Marshal(asset)
+        if err != nil {
+            return err
+        }
+
+        return ctx.GetStub().PutState(id, assetJSON)
+    }
+    ```
+  </Tab>
+  <Tab title="Node.js">
+    ```javascript
+    async CreateAsset(ctx, id, color, size, owner, appraisedValue) {
+        const asset = {
+            ID: id,
+            Color: color,
+            Size: size,
+            Owner: owner,
+            AppraisedValue: appraisedValue,
+        };
+
+        await ctx.stub.putState(id, Buffer.from(JSON.stringify(asset)));
+    }
+    ```
+  </Tab>
+  <Tab title="Java">
+    ```java
+    @Transaction(intent = Transaction.TYPE.SUBMIT)
+    public void CreateAsset(final Context ctx, final String id,
+            final String color, final int size,
+            final String owner, final int appraisedValue) {
+        ChaincodeStub stub = ctx.getStub();
+
+        Asset asset = new Asset(id, color, size, owner, appraisedValue);
+        String assetJSON = genson.serialize(asset);
+        stub.putStringState(id, assetJSON);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Reading state: GetState
+
+<Tabs>
+  <Tab title="Go">
+    ```go
+    // ReadAsset returns the asset stored in the world state with given id.
+    func (s *SmartContract) ReadAsset(ctx contractapi.TransactionContextInterface, id string) (*Asset, error) {
+        assetJSON, err := ctx.GetStub().GetState(id)
+        if err != nil {
+            return nil, fmt.Errorf("failed to read from world state: %v", err)
+        }
+        if assetJSON == nil {
+            return nil, fmt.Errorf("the asset %s does not exist", id)
+        }
+
+        var asset Asset
+        err = json.Unmarshal(assetJSON, &asset)
+        if err != nil {
+            return nil, err
+        }
+
+        return &asset, nil
+    }
+    ```
+  </Tab>
+  <Tab title="Node.js">
+    ```javascript
+    async ReadAsset(ctx, id) {
+        const assetJSON = await ctx.stub.getState(id);
+        if (!assetJSON || assetJSON.length === 0) {
+            throw new Error(`The asset ${id} does not exist`);
+        }
+        return JSON.parse(assetJSON.toString());
+    }
+    ```
+  </Tab>
+  <Tab title="Java">
+    ```java
+    @Transaction(intent = Transaction.TYPE.EVALUATE)
+    public Asset ReadAsset(final Context ctx, final String id) {
+        ChaincodeStub stub = ctx.getStub();
+        String assetJSON = stub.getStringState(id);
+
+        if (assetJSON == null || assetJSON.isEmpty()) {
+            throw new ChaincodeException("Asset " + id + " does not exist");
+        }
+
+        return genson.deserialize(assetJSON, Asset.class);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Deleting state: DelState
+
+```go
+// DeleteAsset deletes a given asset from the world state.
+func (s *SmartContract) DeleteAsset(ctx contractapi.TransactionContextInterface, id string) error {
+    exists, err := s.AssetExists(ctx, id)
+    if err != nil {
+        return err
+    }
+    if !exists {
+        return fmt.Errorf("the asset %s does not exist", id)
+    }
+
+    return ctx.GetStub().DelState(id)
+}
+```
+
+### Range queries: GetStateByRange
+
+To read all keys within a given range, use `GetStateByRange`. Passing empty strings for both start and end performs an open-ended scan of all keys in the chaincode's namespace:
+
+```go
+// GetAllAssets returns all assets found in world state.
+func (s *SmartContract) GetAllAssets(ctx contractapi.TransactionContextInterface) ([]*Asset, error) {
+    resultsIterator, err := ctx.GetStub().GetStateByRange("", "")
+    if err != nil {
+        return nil, err
+    }
+    defer resultsIterator.Close()
+
+    var assets []*Asset
+    for resultsIterator.HasNext() {
+        queryResponse, err := resultsIterator.Next()
+        if err != nil {
+            return nil, err
+        }
+
+        var asset Asset
+        err = json.Unmarshal(queryResponse.Value, &asset)
+        if err != nil {
+            return nil, err
+        }
+        assets = append(assets, &asset)
+    }
+
+    return assets, nil
+}
+```
+
+### Rich queries with CouchDB
+
+If you are using CouchDB as the state database, you can use `GetQueryResult` to run JSON queries against the world state:
+
+```go
+func (s *SmartContract) QueryAssetsByOwner(ctx contractapi.TransactionContextInterface, owner string) ([]*Asset, error) {
+    queryString := fmt.Sprintf(`{"selector":{"Owner":"%s"}}`, owner)
+
+    resultsIterator, err := ctx.GetStub().GetQueryResult(queryString)
+    if err != nil {
+        return nil, err
+    }
+    defer resultsIterator.Close()
+
+    var assets []*Asset
+    for resultsIterator.HasNext() {
+        queryResponse, err := resultsIterator.Next()
+        if err != nil {
+            return nil, err
+        }
+
+        var asset Asset
+        err = json.Unmarshal(queryResponse.Value, &asset)
+        if err != nil {
+            return nil, err
+        }
+        assets = append(assets, &asset)
+    }
+
+    return assets, nil
+}
+```
+
+<Warning>
+`GetQueryResult` is only supported when CouchDB is configured as the state database. LevelDB (the default) does not support JSON queries. Rich queries also do not contribute to the read-write set in the same way as key-based reads, so they are not re-validated at commit time.
+</Warning>
+
+## Accessing transaction context and client identity
+
+Each transaction function receives a context object (`ctx`) that exposes metadata about the current transaction and its submitter.
+
+```go
+// Access the transaction ID
+txID := ctx.GetStub().GetTxID()
+
+// Access the channel ID
+channelID := ctx.GetStub().GetChannelID()
+
+// Access the transaction timestamp (from the ordering service)
+timestamp, err := ctx.GetStub().GetTxTimestamp()
+
+// Retrieve the raw creator certificate bytes
+creator, err := ctx.GetStub().GetCreator()
+```
+
+For access control decisions, the **client identity library** provides convenience functions to extract the MSP ID, certificate attributes, and custom attributes:
+
+```go
+import "github.com/hyperledger/fabric-chaincode-go/pkg/cid"
+
+func (s *SmartContract) RestrictedAction(ctx contractapi.TransactionContextInterface) error {
+    // Get the MSP ID of the submitting organization
+    mspID, err := cid.GetMSPID(ctx.GetStub())
+    if err != nil {
+        return err
+    }
+
+    if mspID != "Org1MSP" {
+        return fmt.Errorf("submitter is not from Org1")
+    }
+
+    // ... proceed with restricted action
+    return nil
+}
+```
+
+## Emitting chaincode events
+
+Chaincode can emit events that client applications can subscribe to. Events are emitted once per transaction and are included in the block that contains the transaction.
+
+```go
+func (s *SmartContract) TransferAsset(ctx contractapi.TransactionContextInterface, id string, newOwner string) error {
+    asset, err := s.ReadAsset(ctx, id)
+    if err != nil {
+        return err
+    }
+
+    oldOwner := asset.Owner
+    asset.Owner = newOwner
+    assetJSON, err := json.Marshal(asset)
+    if err != nil {
+        return err
+    }
+
+    err = ctx.GetStub().PutState(id, assetJSON)
+    if err != nil {
+        return err
+    }
+
+    // Emit an event so applications can listen for transfers
+    transferEvent := struct {
+        AssetID  string
+        From     string
+        To       string
+    }{id, oldOwner, newOwner}
+
+    transferEventJSON, err := json.Marshal(transferEvent)
+    if err != nil {
+        return err
+    }
+
+    return ctx.GetStub().SetEvent("TransferAsset", transferEventJSON)
+}
+```
+
+<Note>
+Only one event can be set per chaincode invocation. Calling `SetEvent` multiple times in the same transaction will overwrite the previous event. The event is only committed to the ledger if the transaction is valid.
+</Note>
+
+## Handling private data
+
+Private data collections allow a subset of channel organizations to store data that is not visible to other channel members. Chaincode accesses private data through the `GetPrivateData` and `PutPrivateData` shim APIs:
+
+```go
+// StorePrivateAsset stores asset details in a private data collection.
+func (s *SmartContract) StorePrivateAsset(ctx contractapi.TransactionContextInterface) error {
+    // Private data is passed in the transient field, not as function arguments
+    transientData, err := ctx.GetStub().GetTransient()
+    if err != nil {
+        return fmt.Errorf("error getting transient data: %v", err)
+    }
+
+    assetJSON, ok := transientData["asset"]
+    if !ok {
+        return fmt.Errorf("asset not found in transient data")
+    }
+
+    // Write to the private collection; only orgs in the collection policy can read this
+    return ctx.GetStub().PutPrivateData("privateAssetCollection", "asset1", assetJSON)
+}
+
+// ReadPrivateAsset retrieves asset details from a private data collection.
+func (s *SmartContract) ReadPrivateAsset(ctx contractapi.TransactionContextInterface, collection string, id string) (*Asset, error) {
+    assetJSON, err := ctx.GetStub().GetPrivateData(collection, id)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read private data: %v", err)
+    }
+    if assetJSON == nil {
+        return nil, fmt.Errorf("private asset %s does not exist in collection %s", id, collection)
+    }
+
+    var asset Asset
+    err = json.Unmarshal(assetJSON, &asset)
+    if err != nil {
+        return nil, err
+    }
+
+    return &asset, nil
+}
+```
+
+<Info>
+Private data is passed to chaincode via the **transient field** of the transaction proposal, not as regular function arguments. This keeps sensitive data out of the transaction itself and off the public ledger. See the [private data architecture reference](https://hyperledger-fabric.readthedocs.io/en/latest/private-data-arch.html) for collection configuration details.
+</Info>
+
+## Writing deterministic chaincode
+
+Fabric's execute-order-validate model requires that all endorsing peers produce identical read-write sets for the same transaction. This means your chaincode must be **deterministic**: given the same inputs and ledger state, it must always produce exactly the same output.
+
+### Things to avoid
+
+- **Random numbers**: Do not use `rand.Int()`, `Math.random()`, or equivalent. If you need a random value, derive it from the transaction ID or a committed ledger value.
+- **Timestamps from the system clock**: `time.Now()` will differ across peers. Use `ctx.GetStub().GetTxTimestamp()` instead, which reads the timestamp from the signed transaction proposal.
+- **Non-deterministic map iteration**: In Go, map iteration order is randomized. When marshaling structs to JSON for storage on the ledger, define fields in alphabetic order so that serialization is consistent across endorsing peers and languages.
+- **External calls**: Chaincode cannot make HTTP requests, read files, or call external services. All required data must either be on the ledger or passed in as transaction arguments.
+
+### JSON determinism
+
+JSON marshaling must produce consistent byte arrays across all endorsing peers (and across languages, if you upgrade chaincode from one language to another).
+
+<Tabs>
+  <Tab title="Go">
+    Go's `encoding/json` marshals struct fields in declaration order and map keys in sorted order. Define your structs with fields in **alphabetic order** to ensure consistency:
+
+    ```go
+    // Fields are in alphabetic order — consistent marshaling guaranteed
+    type Asset struct {
+        AppraisedValue int    `json:"AppraisedValue"`
+        Color          string `json:"Color"`
+        ID             string `json:"ID"`
+        Owner          string `json:"Owner"`
+        Size           int    `json:"Size"`
+    }
+    ```
+  </Tab>
+  <Tab title="Node.js">
+    `JSON.stringify()` does not guarantee key order. Use `json-stringify-deterministic` combined with `sort-keys-recursive`:
+
+    ```javascript
+    const stringify = require('json-stringify-deterministic');
+    const sortKeysRecursive = require('sort-keys-recursive');
+
+    async CreateAsset(ctx, id, color, size, owner, appraisedValue) {
+        const asset = { ID: id, Color: color, Size: size, Owner: owner, AppraisedValue: appraisedValue };
+        await ctx.stub.putState(id, Buffer.from(stringify(sortKeysRecursive(asset))));
+    }
+    ```
+  </Tab>
+  <Tab title="Java">
+    The `Genson` library produces consistent JSON in alphabetic key order and is the recommended serializer for Fabric Java chaincode. Avoid `Gson`, which does not guarantee ordering:
+
+    ```java
+    import com.owlike.genson.Genson;
+
+    private final Genson genson = new Genson();
+
+    // genson.serialize(asset) produces alphabetically-ordered JSON
+    stub.putStringState(id, genson.serialize(asset));
+    ```
+  </Tab>
+</Tabs>
+
+## Testing chaincode locally (dev mode)
+
+Fabric provides a **dev mode** that lets you run chaincode as a standalone process on your machine without going through the full package-install-approve-commit lifecycle. This is useful for rapid iteration during development.
+
+To use dev mode, start the peer with `CORE_CHAINCODE_MODE=dev` (or set `chaincode.mode: dev` in `core.yaml`). The peer will wait for the chaincode process to connect to it rather than launching the chaincode itself.
+
+```bash
+# Start your chaincode process manually, pointing it at the peer
+CORE_PEER_ADDRESS=localhost:7052 CORE_CHAINCODE_ID_NAME=mycc:1.0 ./mycc
+```
+
+<Tip>
+The chaincode-as-a-service (`ccaas`) approach offers a more production-like alternative to dev mode for debugging. You can run the chaincode container with `-it` instead of `-d`, forwarding debug ports to your IDE. See the [deploying chaincode](/chaincode/deploying) page for details.
+</Tip>
+
+## Managing Go dependencies
+
+Go chaincode must vendor its dependencies before packaging, because the peer cannot access the internet at install time:
+
+```bash
+# From your chaincode directory
+go mod tidy
+go mod vendor
+```
+
+This creates a `vendor/` directory containing all dependencies. When `peer lifecycle chaincode package` runs, it includes this directory in the chaincode package.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Chaincode lifecycle" icon="arrows-rotate" href="/chaincode/lifecycle">
+    Learn the package → install → approve → commit process for deploying your chaincode to a channel.
+  </Card>
+  <Card title="Deploying chaincode" icon="rocket" href="/chaincode/deploying">
+    Follow a complete walkthrough deploying the asset-transfer chaincode to the Fabric test network.
+  </Card>
+</CardGroup>

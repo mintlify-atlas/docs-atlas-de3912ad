@@ -1,0 +1,246 @@
+---
+title: "Channels"
+description: "Learn how Hyperledger Fabric channels provide private, isolated subnets of communication between network members, including how to create and manage channels using the channel participation API."
+---
+
+## What is a channel?
+
+A Hyperledger Fabric **channel** is a private subnet of communication between two or more specific network members, designed for conducting private and confidential transactions. Every transaction on the network executes on a channel, where each participating party must be authenticated and authorized.
+
+Channels achieve isolation through three cooperating mechanisms:
+
+- **Configuration chaincode** enforces membership and policy rules at the ledger level.
+- **The MSP identity service** authenticates each peer to its channel peers and services.
+- **The gossip protocol** restricts data dissemination to peers with verifiable membership on the channel.
+
+The result is that no ledger data can pass from one channel to another, even if the same peer belongs to multiple channels and maintains multiple ledgers.
+
+<Info>
+Channels allow network members that require private and confidential transactions to coexist with business competitors and other restricted members on the same blockchain network.
+</Info>
+
+## Channel ledger and membership
+
+Each channel has its own **ledger**, which is shared exclusively by the peers that have joined that channel. The ledger consists of:
+
+- A **blockchain** (the immutable sequence of blocks containing transactions)
+- A **state database** (the current world state derived from committed transactions)
+
+When a peer joins a channel, it receives the channel's genesis block (or the latest config block if added later) and replays all transactions to build its local copy of the ledger. Every peer on the channel maintains an identical copy, kept synchronized by the ordering service and the gossip protocol.
+
+Channel membership is defined in the channel configuration block. An organization becomes a member by having its MSP added to the channel configuration. Once added, the organization's peers can join the channel and participate in transactions.
+
+## System channel vs. application channels
+
+Older Fabric deployments used a **system channel** (also called the orderer system channel) managed by the ordering service. The system channel held the genesis block for every application channel and required the orderer organization to bootstrap new channels. This introduced a central point of control and operational overhead.
+
+<Warning>
+The system channel approach is deprecated. Fabric v2.3 introduced the **channel participation API**, which removes the dependency on the system channel entirely. New deployments should use `osnadmin` to manage channels without a system channel.
+</Warning>
+
+In modern Fabric deployments:
+
+- There is no system channel.
+- Each **application channel** is created directly by submitting a channel genesis block to the ordering service via `osnadmin channel join`.
+- Orderer organizations and peer organizations manage channel membership independently.
+
+## Creating a channel with the channel participation API
+
+The channel participation API uses the `osnadmin` CLI to add ordering nodes to a channel. Each ordering node is joined individually.
+
+<Steps>
+  <Step title="Generate the channel genesis block">
+    Use `configtxgen` to create the genesis block for the new channel:
+
+    ```bash
+    configtxgen -profile ChannelUsingRaft \
+      -outputBlock ./channel-artifacts/mychannel.block \
+      -channelID mychannel
+    ```
+  </Step>
+
+  <Step title="Join the first ordering node">
+    Use `osnadmin` to submit the genesis block to the first ordering node:
+
+    ```bash
+    osnadmin channel join \
+      --channelID mychannel \
+      --config-block ./channel-artifacts/mychannel.block \
+      -o localhost:7053 \
+      --ca-file "$ORDERER_CA" \
+      --client-cert "$ADMIN_TLS_CERTFILE" \
+      --client-key "$ADMIN_TLS_KEYFILE"
+    ```
+  </Step>
+
+  <Step title="Join additional ordering nodes">
+    Repeat the `osnadmin channel join` command for each additional ordering node in the consenter set. Each node syncs the ledger from existing nodes after joining.
+  </Step>
+
+  <Step title="Join peer organizations">
+    Each peer joins the channel using the `peer channel join` command with the genesis block:
+
+    ```bash
+    peer channel join -b ./channel-artifacts/mychannel.block
+    ```
+  </Step>
+
+  <Step title="Update anchor peers">
+    Submit a channel configuration update transaction to set anchor peers for each organization (required for cross-organization gossip):
+
+    ```bash
+    peer channel update \
+      -o localhost:7050 \
+      -c mychannel \
+      -f ./channel-artifacts/Org1MSPanchors.tx \
+      --tls --cafile "$ORDERER_CA"
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+You can list all channels an ordering node has joined using `osnadmin channel list`. Use `osnadmin channel remove` to remove an ordering node from a channel without affecting the channel itself.
+</Tip>
+
+## Adding organizations to a channel
+
+Adding a new organization to an existing channel is a multi-step configuration update process:
+
+<Steps>
+  <Step title="Fetch the current channel config">
+    ```bash
+    peer channel fetch config config_block.pb \
+      -o localhost:7050 \
+      -c mychannel \
+      --tls --cafile "$ORDERER_CA"
+    ```
+
+    Decode the protobuf to JSON:
+
+    ```bash
+    configtxlator proto_decode \
+      --input config_block.pb \
+      --type common.Block | jq .data.data[0].payload.data.config > config.json
+    ```
+  </Step>
+
+  <Step title="Add the new org's MSP">
+    Generate the new organization's configuration JSON using `configtxgen`, then add it to the `Application.groups` section of `config.json` to produce `modified_config.json`.
+  </Step>
+
+  <Step title="Compute the config delta and submit">
+    ```bash
+    # Encode both configs
+    configtxlator proto_encode --input config.json \
+      --type common.Config --output config.pb
+
+    configtxlator proto_encode --input modified_config.json \
+      --type common.Config --output modified_config.pb
+
+    # Compute the update delta
+    configtxlator compute_update \
+      --channel_id mychannel \
+      --original config.pb \
+      --updated modified_config.pb \
+      --output org3_update.pb
+
+    # Wrap the delta in an envelope
+    configtxlator proto_decode --input org3_update.pb \
+      --type common.ConfigUpdate | jq . > org3_update.json
+
+    echo '{"payload":{"header":{"channel_header":{"channel_id":"mychannel","type":2}},"data":{"config_update":'$(cat org3_update.json)'}}}' \
+      | jq . > org3_update_in_envelope.json
+
+    configtxlator proto_encode \
+      --input org3_update_in_envelope.json \
+      --type common.Envelope \
+      --output org3_update_in_envelope.pb
+    ```
+
+    The update must be signed by the required channel admins (as defined by the `Application/Admins` policy) and then submitted using `peer channel update`.
+  </Step>
+</Steps>
+
+## Anchor peers and cross-organization gossip
+
+An **anchor peer** is a peer designated in the channel configuration to facilitate cross-organization gossip. When a peer from one organization wants to discover peers in other organizations, it contacts the anchor peers of those organizations.
+
+<CardGroup cols={2}>
+  <Card title="Discovery" icon="radar">
+    Anchor peers bootstrap cross-org peer discovery. Once organizations learn about each other through anchor peers, gossip continues directly between any reachable peers.
+  </Card>
+  <Card title="Private data" icon="lock">
+    Private data collections require anchor peers and `CORE_PEER_GOSSIP_EXTERNALENDPOINT` to be set on each peer so that authorized organizations can exchange private data hashes.
+  </Card>
+</CardGroup>
+
+Each organization should define at least one anchor peer for availability and redundancy. The anchor peer does not need to be the same node as the leader peer (which pulls blocks from the ordering service).
+
+```yaml
+# Anchor peer entry in channel configuration (configtx.yaml)
+Organizations:
+  - &Org1
+    Name: Org1MSP
+    AnchorPeers:
+      - Host: peer0.org1.example.com
+        Port: 7051
+```
+
+<Warning>
+Without anchor peers, cross-organization gossip will not work, which means private data collections and cross-org endorsements may fail silently. Ensure `CORE_PEER_GOSSIP_EXTERNALENDPOINT` is configured on every peer that needs to be reachable from outside its organization.
+</Warning>
+
+## Channel configuration and config blocks
+
+The channel configuration is stored as a **config block** in the channel ledger. It encodes:
+
+- The MSPs of all member organizations
+- Orderer parameters (batch size, batch timeout, consenter set)
+- Application policies (Readers, Writers, Admins, Endorsement, LifecycleEndorsement)
+- Anchor peer definitions
+
+The very first config block in the channel ledger is the **genesis block**. Every subsequent configuration update produces a new config block that supersedes the previous one.
+
+Config blocks are protobuf-encoded and can be decoded using `configtxlator`:
+
+```bash
+configtxlator proto_decode \
+  --input config_block.pb \
+  --type common.Block \
+  | jq .data.data[0].payload.data.config
+```
+
+## Updating channel configuration
+
+All channel configuration changes follow the same pattern: fetch the current config, modify the JSON representation, compute the delta, collect the required signatures, and submit the update.
+
+The policies controlling who can update which part of the configuration are themselves stored in the config block. Common update operations include:
+
+<AccordionGroup>
+  <Accordion title="Updating orderer batch parameters">
+    Modify `channel_group.groups.Orderer.values.BatchSize` or `BatchTimeout` in the config JSON to adjust how blocks are cut.
+  </Accordion>
+  <Accordion title="Rotating MSP certificates">
+    Update the MSP definition in `channel_group.groups.Application.groups.<OrgMSP>` to add new root CA certificates or intermediate CAs.
+  </Accordion>
+  <Accordion title="Adding or removing anchor peers">
+    Modify `channel_group.groups.Application.groups.<OrgMSP>.values.AnchorPeers` to add or remove anchor peer endpoints.
+  </Accordion>
+  <Accordion title="Updating channel policies">
+    Policies such as `Readers`, `Writers`, `Admins`, and `Endorsement` can be updated by modifying the relevant policy entries in the config JSON.
+  </Accordion>
+</AccordionGroup>
+
+## Removing an organization from a channel
+
+Removing an organization is the reverse of adding one: fetch the current config, delete the organization's MSP entry from `Application.groups`, compute the delta, collect signatures from the remaining required admins, and submit the update.
+
+<Note>
+Removing an organization from the channel configuration does not delete its historical transactions from the ledger. The immutable ledger retains all past transactions regardless of current membership.
+</Note>
+
+After the config update is committed:
+
+1. The removed organization's peers can no longer endorse or commit new transactions on the channel.
+2. Other peers will stop gossiping with the removed organization's peers on this channel.
+3. If any of the removed organization's nodes were in the orderer consenter set, they must also be removed from the consenter set as a separate step (see [Consensus](/operations/consensus) for details).
